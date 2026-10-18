@@ -524,6 +524,9 @@ void wifi_init_softap()
         if (!u.empty()) GetHAL()->setSettingStr("ai_url", u);
         if (!k.empty()) GetHAL()->setSettingStr("ai_key", k);
         if (!m.empty()) GetHAL()->setSettingStr("ai_model", m);
+        // Claves "personales" de Anthropic sin workspace fijo exigen la cabecera anthropic-workspace-id.
+        std::string ws = conf_get(conf, "ai_workspace");
+        GetHAL()->setSettingStr("ai_ws", ws);  // vacio = no se envia
         // Limites de tokens. Una linea presente (aunque sea 0) sobrescribe NVS.
         std::string mt = conf_get(conf, "ai_max_tokens");  // max tokens por respuesta
         std::string bg = conf_get(conf, "ai_budget");      // presupuesto total (0 = sin limite)
@@ -571,7 +574,9 @@ void wifi_init_softap()
                  "ai_url=\r\nai_key=\r\nai_model=deepseek-chat\r\n"
                  "# Tokens: max por respuesta, presupuesto total (0 = sin limite;\r\n"
                  "# RESET en el chat lo pone a cero) y aviso de conversacion larga.\r\n"
-                 "ai_max_tokens=1024\r\nai_budget=0\r\nai_ctx_warn=8000\r\n\r\n"
+                 "ai_max_tokens=1024\r\nai_budget=0\r\nai_ctx_warn=8000\r\n"
+                 "# Solo claves Anthropic personales sin workspace fijo: wrkspc_...\r\n"
+                 "ai_workspace=\r\n\r\n"
                  "# PIN de bloqueo (4-8 digitos). Vacio o 'pin=clear' = sin bloqueo.\r\n"
                  "# (recuperacion: si te bloqueas, pon pin=clear y reinicia)\r\n"
                  "pin=\r\n",
@@ -906,6 +911,8 @@ static void chat_task(void*)
     std::string auth = "Bearer " + key;
     esp_http_client_set_header(c, "Authorization", auth.c_str());
     esp_http_client_set_header(c, "Content-Type", "application/json");
+    std::string ws = GetHAL()->getSettingStr("ai_ws", "");
+    if (!ws.empty()) esp_http_client_set_header(c, "anthropic-workspace-id", ws.c_str());
     esp_http_client_set_post_field(c, body.c_str(), body.size());
     esp_err_t e = esp_http_client_perform(c);
     int status  = esp_http_client_get_status_code(c);
