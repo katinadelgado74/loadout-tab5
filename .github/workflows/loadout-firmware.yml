@@ -73,6 +73,20 @@ jobs:
           echo "::error title=build errors::$(grep -nE 'error|Error|ERROR|failed|FAILED|undefined reference|No version|Cannot|conflict' "$f" | grep -v -- '-Werror' | head -60 | enc)"
           echo "::warning title=build log tail::$(tail -n 80 "$f" | enc)"
 
+      - name: Push build outputs to 'builds' branch
+        shell: bash
+        run: |
+          set -e
+          cd "$GITHUB_WORKSPACE"
+          mkdir -p /tmp/out && cp loadout-tab5.bin loadout-tab5-factory.bin latest.json /tmp/out/
+          cp platforms/tab5/build/m5stack_tab5.elf /tmp/out/ 2>/dev/null || true
+          cp platforms/tab5/build/flash_args platforms/tab5/build/partition_table/partition-table.bin /tmp/out/ 2>/dev/null || true
+          cp platforms/tab5/dependencies.lock /tmp/out/ 2>/dev/null || true
+          cd /tmp/out
+          git init -q -b builds && git config user.name ci && git config user.email ci@localhost
+          git add -A && git commit -qm "build ${GITHUB_SHA::7}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${GITHUB_REPOSITORY}.git" builds
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
