@@ -110,6 +110,23 @@ static bool s_sta_connected = false;
 static char s_sta_ssid[33]  = {0};
 static char s_sta_ip[16]    = {0};
 static bool s_ntp_started   = false;
+static volatile int s_sta_last_reason = 0;  // ultimo motivo de desconexion (wifi_err_reason_t)
+
+static const char* sta_reason_text(int r)
+{
+    switch (r) {
+        case 2: case 15: case 202: case 204: case 205: return "wrong password / auth failed";
+        case 201: return "network not found (2.4 GHz only - check SSID)";
+        case 200: return "beacon timeout (weak signal?)";
+        case 203: return "association failed";
+        case 8: return "left network";
+        case 3: case 4: return "dropped by router";
+        case 210: return "no AP found compatible security";
+        case 211: return "no AP found in auth mode threshold";
+        case 212: return "no AP found in RSSI threshold";
+        default: return "";
+    }
+}
 
 // NTP sincronizado -> aplica zona horaria (config "tz", POSIX) y pone el RTC en hora.
 static void ntp_sync_cb(struct timeval* tv)
@@ -144,13 +161,19 @@ static void wifi_remote_sta_start_handler(void* arg, esp_event_base_t base, int3
 static void wifi_remote_sta_event_handler(void* arg, esp_event_base_t base, int32_t id, void* data)
 {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        auto* dis = static_cast<wifi_event_sta_disconnected_t*>(data);
+        if (dis) {
+            s_sta_last_reason = dis->reason;
+            ESP_LOGW(TAG, "STA desconectado, reason=%d %s", dis->reason, sta_reason_text(dis->reason));
+        }
         s_sta_connected = false;
         s_sta_ip[0]     = 0;
         esp_wifi_connect();  // reintento
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         auto* ev = static_cast<ip_event_got_ip_t*>(data);
         snprintf(s_sta_ip, sizeof(s_sta_ip), IPSTR, IP2STR(&ev->ip_info.ip));
-        s_sta_connected = true;
+        s_sta_connected   = true;
+        s_sta_last_reason = 0;
         ESP_LOGI(TAG, "STA conectado, IP: %s", s_sta_ip);
         // NTP: poner la hora automaticamente (una vez). El cb pone el RTC.
         if (!s_ntp_started) {
@@ -940,6 +963,11 @@ std::string HalEsp32::wifiStaInfo()
 {
     if (s_sta_ssid[0] == 0) return "not configured (edit /sd/loadout.conf)";
     if (s_sta_connected) return std::string(s_sta_ssid) + "  " + s_sta_ip;
+    if (s_sta_last_reason) {
+        const char* t = sta_reason_text(s_sta_last_reason);
+        return std::string(s_sta_ssid) + "  (retrying: " + (t[0] ? t : "reason") + " #" +
+               std::to_string(s_sta_last_reason) + ")";
+    }
     return std::string(s_sta_ssid) + "  (connecting...)";
 }
 
