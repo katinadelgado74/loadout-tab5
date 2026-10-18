@@ -344,6 +344,27 @@ public:
     virtual void chatReset()
     {
     }
+    // Consumo de tokens del chatbot (lo que devuelve la API en "usage").
+    struct ChatUsage_t {
+        int budget         = 0;      // ai_budget del .conf (0 = sin limite)
+        int used           = 0;      // tokens gastados desde el ultimo RESET (persistente, NVS)
+        int convTokens     = 0;      // tamano de la conversacion actual (prompt+respuesta de la ultima peticion)
+        int convWarn       = 0;      // ai_ctx_warn: aviso de conversacion larga
+        int maxReply       = 0;      // ai_max_tokens: limite por respuesta
+        int lastReply      = 0;      // tokens de la ultima respuesta
+        bool truncated     = false;  // la ultima respuesta se corto por ai_max_tokens
+        bool budgetBlocked = false;  // la ultima peticion se rechazo por presupuesto agotado
+    };
+    virtual ChatUsage_t chatUsage()
+    {
+        return ChatUsage_t();
+    }
+    virtual void chatResetBudget()  // pone "used" a 0
+    {
+    }
+    virtual void chatNewConversation()  // borra el historial (memoria) de la conversacion
+    {
+    }
 
     /* --------------------------------- SD Card -------------------------------- */
     struct FileEntry_t {

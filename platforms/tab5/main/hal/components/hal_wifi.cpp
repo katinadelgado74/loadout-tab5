@@ -486,6 +486,13 @@ void wifi_init_softap()
         if (!u.empty()) GetHAL()->setSettingStr("ai_url", u);
         if (!k.empty()) GetHAL()->setSettingStr("ai_key", k);
         if (!m.empty()) GetHAL()->setSettingStr("ai_model", m);
+        // Limites de tokens. Una linea presente (aunque sea 0) sobrescribe NVS.
+        std::string mt = conf_get(conf, "ai_max_tokens");  // max tokens por respuesta
+        std::string bg = conf_get(conf, "ai_budget");      // presupuesto total (0 = sin limite)
+        std::string cw = conf_get(conf, "ai_ctx_warn");    // aviso de conversacion larga
+        if (!mt.empty()) GetHAL()->setSettingInt("ai_max_tok", atoi(mt.c_str()));
+        if (!bg.empty()) GetHAL()->setSettingInt("ai_budget", atoi(bg.c_str()));
+        if (!cw.empty()) GetHAL()->setSettingInt("ai_ctx_warn", atoi(cw.c_str()));
     }
 
     // --- PIN de bloqueo (4-8 digitos). Recuperacion: pin=clear lo desactiva.
@@ -504,7 +511,7 @@ void wifi_init_softap()
 
     // --- Crear /sd/loadout.conf por defecto si no existe (con los valores actuales) ---
     if (conf.empty()) {
-        char tmpl[1280];
+        char tmpl[2048];
         snprintf(tmpl, sizeof(tmpl),
                  "# LOADOUT config - edita y reinicia\r\n"
                  "# Password del AP LOADOUT (min 8 chars):\r\n"
@@ -523,7 +530,10 @@ void wifi_init_softap()
                  "# ai_url=https://api.deepseek.com/chat/completions\r\n"
                  "# ai_key=sk-...\r\n"
                  "# ai_model=deepseek-chat\r\n"
-                 "ai_url=\r\nai_key=\r\nai_model=deepseek-chat\r\n\r\n"
+                 "ai_url=\r\nai_key=\r\nai_model=deepseek-chat\r\n"
+                 "# Tokens: max por respuesta, presupuesto total (0 = sin limite;\r\n"
+                 "# RESET en el chat lo pone a cero) y aviso de conversacion larga.\r\n"
+                 "ai_max_tokens=1024\r\nai_budget=0\r\nai_ctx_warn=8000\r\n\r\n"
                  "# PIN de bloqueo (4-8 digitos). Vacio o 'pin=clear' = sin bloqueo.\r\n"
                  "# (recuperacion: si te bloqueas, pon pin=clear y reinicia)\r\n"
                  "pin=\r\n",
@@ -720,6 +730,14 @@ static std::string  s_chat_reply;
 static std::vector<std::pair<std::string, std::string>> s_chat_hist;  // (role, content)
 static const size_t CHAT_HIST_MAX = 12;  // ultimos N mensajes (memoria de conversacion)
 
+// Contadores de tokens (ver HalBase::ChatUsage_t).
+static volatile int  s_conv_tokens    = 0;
+static volatile int  s_last_reply_tok = 0;
+static volatile bool s_truncated      = false;
+static volatile bool s_budget_blocked = false;
+static const int     DEF_MAX_TOKENS   = 1024;
+static const int     DEF_CTX_WARN     = 8000;
+
 static std::string json_escape(const std::string& s)
 {
     std::string o; o.reserve(s.size() + 8);
@@ -778,9 +796,27 @@ static std::string json_get_string(const std::string& j, const char* key)
     return json_unescape(esc);
 }
 
+// Valor entero de la PRIMERA "key":N (p.ej. usage.prompt_tokens). -1 si no esta.
+static int json_get_int(const std::string& j, const char* key)
+{
+    std::string pat = std::string("\"") + key + "\"";
+    size_t k = j.find(pat);
+    if (k == std::string::npos) return -1;
+    size_t c = j.find(':', k + pat.size());
+    if (c == std::string::npos) return -1;
+    size_t i = c + 1;
+    while (i < j.size() && (j[i] == ' ' || j[i] == '\t' || j[i] == '\r' || j[i] == '\n')) i++;
+    if (i >= j.size() || j[i] < '0' || j[i] > '9') return -1;
+    long v = 0;
+    while (i < j.size() && j[i] >= '0' && j[i] <= '9' && v < 100000000L) v = v * 10 + (j[i++] - '0');
+    return (int)v;
+}
+
 static void chat_task(void*)
 {
     s_chat_state = 1;
+    s_truncated      = false;
+    s_budget_blocked = false;
     std::string url   = GetHAL()->getSettingStr("ai_url", "");
     std::string key   = GetHAL()->getSettingStr("ai_key", "");
     std::string model = GetHAL()->getSettingStr("ai_model", "deepseek-chat");
@@ -790,6 +826,18 @@ static void chat_task(void*)
     if (!s_sta_connected) {
         s_chat_reply = "Connect home WiFi first (Settings)"; s_chat_state = 3; vTaskDelete(NULL); return;
     }
+    // Presupuesto agotado -> no se envia nada (no gasta tokens).
+    int budget = GetHAL()->getSettingInt("ai_budget", 0);
+    int used   = GetHAL()->getSettingInt("ai_used", 0);
+    if (budget > 0 && used >= budget) {
+        if (!s_chat_hist.empty() && s_chat_hist.back().first == "user") s_chat_hist.pop_back();  // no se envio
+        s_budget_blocked = true;
+        s_chat_reply = "Token budget used up (" + std::to_string(used) + " / " + std::to_string(budget) +
+                       "). Tap RESET or raise ai_budget in loadout.conf.";
+        s_chat_state = 3; vTaskDelete(NULL); return;
+    }
+    int maxTok = GetHAL()->getSettingInt("ai_max_tok", DEF_MAX_TOKENS);
+    if (maxTok <= 0) maxTok = DEF_MAX_TOKENS;
     // Construir messages[] con todo el historial (memoria de conversacion).
     std::string msgs;
     for (size_t i = 0; i < s_chat_hist.size(); i++) {
@@ -797,7 +845,8 @@ static void chat_task(void*)
         msgs += "{\"role\":\"" + s_chat_hist[i].first + "\",\"content\":\"" +
                 json_escape(s_chat_hist[i].second) + "\"}";
     }
-    std::string body = "{\"model\":\"" + model + "\",\"messages\":[" + msgs + "],\"stream\":false}";
+    std::string body = "{\"model\":\"" + model + "\",\"max_tokens\":" + std::to_string(maxTok) +
+                       ",\"messages\":[" + msgs + "],\"stream\":false}";
     std::string resp;
     esp_http_client_config_t cfg = {};
     cfg.url               = url.c_str();
@@ -818,6 +867,19 @@ static void chat_task(void*)
         s_chat_reply = std::string("Network error: ") + esp_err_to_name(e); s_chat_state = 3;
         vTaskDelete(NULL); return;
     }
+    // Consumo real que reporta la API ("usage"): se suma aunque la respuesta venga vacia.
+    int pt = json_get_int(resp, "prompt_tokens");
+    int ct = json_get_int(resp, "completion_tokens");
+    if (pt >= 0 || ct >= 0) {
+        if (pt < 0) pt = 0;
+        if (ct < 0) ct = 0;
+        s_conv_tokens    = pt + ct;  // lo que ocupa ya la conversacion (se reenvia entera)
+        s_last_reply_tok = ct;
+        GetHAL()->setSettingInt("ai_used", used + pt + ct);
+    }
+    std::string finish = json_get_string(resp, "finish_reason");
+    if (finish == "length" || finish == "max_tokens") s_truncated = true;
+
     std::string content = json_get_string(resp, "content");
     if (!content.empty()) {
         s_chat_reply = content;
@@ -843,6 +905,31 @@ void HalEsp32::chatSend(const std::string& prompt)
 int HalEsp32::chatState() { return s_chat_state; }
 std::string HalEsp32::chatReply() { return s_chat_reply; }
 void HalEsp32::chatReset() { if (s_chat_state != 1) s_chat_state = 0; }
+
+hal::HalBase::ChatUsage_t HalEsp32::chatUsage()
+{
+    ChatUsage_t u;
+    u.budget        = getSettingInt("ai_budget", 0);
+    u.used          = getSettingInt("ai_used", 0);
+    u.convTokens    = s_conv_tokens;
+    u.convWarn      = getSettingInt("ai_ctx_warn", DEF_CTX_WARN);
+    u.maxReply      = getSettingInt("ai_max_tok", DEF_MAX_TOKENS);
+    u.lastReply     = s_last_reply_tok;
+    u.truncated     = s_truncated;
+    u.budgetBlocked = s_budget_blocked;
+    return u;
+}
+
+void HalEsp32::chatResetBudget() { setSettingInt("ai_used", 0); s_budget_blocked = false; }
+
+void HalEsp32::chatNewConversation()
+{
+    if (s_chat_state == 1) return;  // no tocar el historial mientras se envia
+    s_chat_hist.clear();
+    s_conv_tokens    = 0;
+    s_last_reply_tok = 0;
+    s_truncated      = false;
+}
 
 bool HalEsp32::wifiStaConnected()
 {

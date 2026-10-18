@@ -1338,9 +1338,20 @@ public:
     void onOpen() override
     {
         lv_obj_t* root = _window->get();
+        // Barra de tokens: contador (izq) + NEW CHAT / RESET (der)
+        _stat = std::make_unique<Label>(root);
+        _stat->align(LV_ALIGN_TOP_LEFT, 30, 62); _stat->setTextFont(&lv_font_montserrat_20);
+        _stat->setTextColor(lv_color_hex(COL_ACCENT)); _stat->setText("Tokens: -");
+        lv_obj_set_width(_stat->get(), 610);
+        lv_label_set_long_mode(_stat->get(), LV_LABEL_LONG_DOT);  // no pisar los botones
+        _newBtn = make_small_btn(root, LV_SYMBOL_REFRESH " NEW CHAT", -264, _newLab);
+        _newBtn->onClick().connect([this] { _pendingNew = true; });
+        _rstBtn = make_small_btn(root, LV_SYMBOL_TRASH " RESET", -86, _rstLab);
+        _rstBtn->onClick().connect([this] { _pendingRst = true; });
+
         // Conversacion (scroll vertical)
         _conv = std::make_unique<Container>(root);
-        _conv->align(LV_ALIGN_TOP_MID, 0, 54); _conv->setSize(1020, 470);
+        _conv->align(LV_ALIGN_TOP_MID, 0, 100); _conv->setSize(1020, 424);
         _conv->setBorderWidth(0); _conv->setBgColor(lv_color_hex(0x0a120f)); _conv->setRadius(8);
         lv_obj_set_flex_flow(_conv->get(), LV_FLEX_FLOW_COLUMN);
         lv_obj_set_style_pad_row(_conv->get(), 8, 0); lv_obj_set_style_pad_all(_conv->get(), 12, 0);
@@ -1365,6 +1376,7 @@ public:
         _send->onClick().connect([this] { _pendingSend = true; });
 
         addBubble("Configure ai_url/ai_key/ai_model in /sd/loadout.conf, connect home WiFi, and ask.", false);
+        refreshUsage(true);
 
         // Teclado -> textarea (modo edicion)
         _grp = lv_group_create();
@@ -1397,8 +1409,38 @@ public:
                 if (_pendBubble) lv_label_set_text(_pendBubble, (st == 3 ? std::string(LV_SYMBOL_WARNING "  ") + r : r).c_str());
                 _busy = false; _pendBubble = nullptr;
                 GetHAL()->chatReset();
+                refreshUsage(false);
                 if (_conv) lv_obj_scroll_to_y(_conv->get(), LV_COORD_MAX, LV_ANIM_OFF);
             }
+        }
+        if (_pendingNew) {
+            _pendingNew = false;
+            if (!_busy) {
+                GetHAL()->chatNewConversation();
+                clearBubbles();
+                addBubble("New conversation started. Claude no longer sees the earlier messages.", false);
+                _convWarned = false;
+                refreshUsage(false);
+            }
+        }
+        if (_pendingRst) {
+            _pendingRst = false;
+            uint32_t now = lv_tick_get();
+            if (_rstArmedAt && now - _rstArmedAt < 3000) {  // segundo toque = confirmar
+                GetHAL()->chatResetBudget();
+                _rstArmedAt = 0; _budgetWarnLvl = 0;
+                if (_rstLab) _rstLab->setText(LV_SYMBOL_TRASH " RESET");
+                addBubble("Token counter reset to 0.", false);
+                refreshUsage(false);
+                if (_conv) lv_obj_scroll_to_y(_conv->get(), LV_COORD_MAX, LV_ANIM_OFF);
+            } else {                                        // primer toque = armar
+                _rstArmedAt = now ? now : 1;
+                if (_rstLab) _rstLab->setText(LV_SYMBOL_WARNING " SURE?");
+            }
+        }
+        if (_rstArmedAt && lv_tick_get() - _rstArmedAt >= 3000) {  // expira la confirmacion
+            _rstArmedAt = 0;
+            if (_rstLab) _rstLab->setText(LV_SYMBOL_TRASH " RESET");
         }
     }
     void onClose() override
@@ -1406,9 +1448,83 @@ public:
         if (GetHAL()->lvKeyboard) lv_indev_set_group(GetHAL()->lvKeyboard, nullptr);
         if (_grp) { lv_group_del(_grp); _grp = nullptr; }
         _bubbles.clear(); _bubbleLabels.clear(); _conv.reset(); _send.reset(); _sendLab.reset();
+        _stat.reset(); _newLab.reset(); _rstLab.reset(); _newBtn.reset(); _rstBtn.reset();
         if (_ta) { lv_obj_del(_ta); _ta = nullptr; }
     }
 private:
+    static constexpr uint32_t COL_WARN = 0xffd166;  // amarillo: >=80%
+    static constexpr uint32_t COL_CRIT = 0xff8a80;  // rojo: >=95% / agotado
+
+    static std::string fmt_num(int v)  // 123456 -> "123,456"
+    {
+        std::string s = std::to_string(v < 0 ? 0 : v);
+        for (int i = (int)s.size() - 3; i > 0; i -= 3) s.insert((size_t)i, ",");
+        return s;
+    }
+
+    std::unique_ptr<Container> make_small_btn(lv_obj_t* p, const char* txt, int dx, std::unique_ptr<Label>& lab)
+    {
+        auto b = std::make_unique<Container>(p);
+        b->setSize(166, 40); b->align(LV_ALIGN_TOP_RIGHT, dx, 54);
+        b->setRadius(8); b->setBgColor(lv_color_hex(0x16241d)); b->setBorderWidth(1);
+        b->setBorderColor(lv_color_hex(0x2a3a32));
+        lab = std::make_unique<Label>(b->get());
+        lab->align(LV_ALIGN_CENTER, 0, 0); lab->setTextFont(&lv_font_montserrat_20);
+        lab->setTextColor(lv_color_hex(COL_LABEL)); lab->setText(txt);
+        return b;
+    }
+
+    void clearBubbles()
+    {
+        _bubbleLabels.clear();
+        _bubbles.clear();
+        _pendBubble = nullptr;
+    }
+
+    // Actualiza el contador y anade avisos. Se llama al abrir y tras cada respuesta
+    // (no en cada frame: chatUsage() lee NVS).
+    void refreshUsage(bool onOpen)
+    {
+        auto u = GetHAL()->chatUsage();
+        int lvl = 0;  // 0 ok, 1 aviso, 2 critico
+        std::string txt;
+        if (u.budget > 0) {
+            int left = u.budget - u.used;
+            int pct  = (int)((long long)u.used * 100 / u.budget);
+            txt = "Tokens left: " + fmt_num(left) + " / " + fmt_num(u.budget);
+            int bl = (pct >= 95) ? 2 : (pct >= 80) ? 1 : 0;
+            lvl = bl;
+            if (bl > _budgetWarnLvl) {  // avisar una vez por umbral
+                _budgetWarnLvl = bl;
+                if (left <= 0)
+                    addBubble(LV_SYMBOL_WARNING "  Token budget used up. Tap RESET or raise ai_budget in loadout.conf.", false);
+                else
+                    addBubble(std::string(LV_SYMBOL_WARNING "  ") + std::to_string(pct) + "% of token budget used - " +
+                                  fmt_num(left) + " tokens left.", false);
+            }
+        } else {
+            txt = "Tokens used: " + fmt_num(u.used) + " (no budget)";
+        }
+        if (u.convWarn > 0) {
+            txt += "  |  Chat: " + fmt_num(u.convTokens) + " / " + fmt_num(u.convWarn);
+            int cpct = (int)((long long)u.convTokens * 100 / u.convWarn);
+            int cl   = (cpct >= 100) ? 2 : (cpct >= 80) ? 1 : 0;
+            if (cl > lvl) lvl = cl;
+            if (cl > 0 && !_convWarned && !onOpen) {
+                _convWarned = true;
+                addBubble(LV_SYMBOL_WARNING "  This chat is getting long (" + fmt_num(u.convTokens) +
+                              " tokens). Every message resends the whole chat - tap NEW CHAT to save tokens.", false);
+            }
+        }
+        if (u.truncated && !onOpen)
+            addBubble(LV_SYMBOL_WARNING "  Reply cut off at the " + fmt_num(u.maxReply) +
+                          "-token limit. Say \"continue\" or raise ai_max_tokens.", false);
+        if (_stat) {
+            _stat->setText(txt);
+            _stat->setTextColor(lv_color_hex(lvl == 2 ? COL_CRIT : lvl == 1 ? COL_WARN : COL_ACCENT));
+        }
+    }
+
     static void ready_cb(lv_event_t* e)
     { auto* s = static_cast<ChatWindow*>(lv_event_get_user_data(e)); if (s) s->_pendingSend = true; }
 
@@ -1438,6 +1554,11 @@ private:
     lv_obj_t* _pendBubble = nullptr;
     lv_group_t* _grp = nullptr;
     bool _busy = false, _pendingSend = false;
+    std::unique_ptr<Label> _stat, _newLab, _rstLab;
+    std::unique_ptr<Container> _newBtn, _rstBtn;
+    bool _pendingNew = false, _pendingRst = false, _convWarned = false;
+    int _budgetWarnLvl = 0;
+    uint32_t _rstArmedAt = 0;
 };
 
 /* --------------------------- ventana Music (Winamp) ----------------------- */
