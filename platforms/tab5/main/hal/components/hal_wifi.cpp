@@ -142,20 +142,35 @@ static void ntp_sync_cb(struct timeval* tv)
              lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday, lt.tm_hour, lt.tm_min, tz.c_str());
 }
 
+static volatile const char* s_sta_stage = "waiting for STA start";  // diagnostico en pantalla
+
 static void wifi_remote_sta_start_handler(void* arg, esp_event_base_t base, int32_t event_id, void* data)
 {
     auto* netif = static_cast<esp_netif_t*>(arg);
     if (s_sta_started) return;
+    ESP_LOGI(TAG, "STA start event");
     auto driver = static_cast<wifi_netif_driver_t>(esp_netif_get_io_driver(netif));
-    uint8_t mac[6];
-    if (esp_wifi_get_if_mac(driver, mac) != ESP_OK) return;
-    if (esp_wifi_is_if_ready_when_started(driver)) {
-        if (esp_wifi_register_if_rxcb(driver, esp_netif_receive, netif) != ESP_OK) return;
+    uint8_t mac[6] = {0};
+    esp_err_t ret = esp_wifi_get_if_mac(driver, mac);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "STA esp_wifi_get_if_mac failed: %s", esp_err_to_name(ret));
+        s_sta_stage = "STA mac failed";
+    } else {
+        if (esp_wifi_is_if_ready_when_started(driver)) {
+            ret = esp_wifi_register_if_rxcb(driver, esp_netif_receive, netif);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "STA esp_wifi_register_if_rxcb failed: %s", esp_err_to_name(ret));
+                s_sta_stage = "STA rxcb failed";
+            }
+        }
+        esp_netif_set_mac(netif, mac);
     }
-    esp_netif_set_mac(netif, mac);
     esp_netif_action_start(netif, base, event_id, data);
     s_sta_started = true;
-    esp_wifi_connect();
+    // Conectar SIEMPRE (antes, cualquier fallo de arriba dejaba el STA sin intentar conectar).
+    ret = esp_wifi_connect();
+    ESP_LOGI(TAG, "STA esp_wifi_connect -> %s", esp_err_to_name(ret));
+    s_sta_stage = (ret == ESP_OK) ? "connecting" : "connect call failed";
 }
 
 static void wifi_remote_sta_event_handler(void* arg, esp_event_base_t base, int32_t id, void* data)
@@ -590,6 +605,15 @@ void wifi_init_softap()
     // corriente del radio: ayuda con los brownouts si la alimentacion es flojita.
     esp_wifi_set_max_tx_power(40);  // unidades de 0.25 dBm -> 40 = 10 dBm
     ESP_LOGI(TAG, "Wi-Fi AP:%s  STA:%s (tx 10dBm)", WIFI_SSID, useSta ? staSsid.c_str() : "(off)");
+    if (useSta) {
+        vTaskDelay(pdMS_TO_TICKS(6000));
+        if (!s_sta_started) {
+            ESP_LOGW(TAG, "No llego WIFI_EVENT_STA_START en 6 s -> esp_wifi_connect() directo");
+            s_sta_stage = "no STA start event; forcing connect";
+            esp_err_t r = esp_wifi_connect();
+            ESP_LOGI(TAG, "STA esp_wifi_connect (forzado) -> %s", esp_err_to_name(r));
+        }
+    }
 }
 
 static void wifi_ap_test_task(void* param)
@@ -968,7 +992,7 @@ std::string HalEsp32::wifiStaInfo()
         return std::string(s_sta_ssid) + "  (retrying: " + (t[0] ? t : "reason") + " #" +
                std::to_string(s_sta_last_reason) + ")";
     }
-    return std::string(s_sta_ssid) + "  (connecting...)";
+    return std::string(s_sta_ssid) + "  (" + (const char*)s_sta_stage + "...)";
 }
 
 bool HalEsp32::wifi_init()
