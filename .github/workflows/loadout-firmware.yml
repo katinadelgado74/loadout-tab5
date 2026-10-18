@@ -45,7 +45,8 @@ jobs:
             > platforms/tab5/main/loadout_version.h
 
           cd platforms/tab5
-          idf.py build
+          set -o pipefail
+          idf.py build 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
 
           # App image (OTA, se escribe en la ranura libre) + imagen factory fusionada
           # (bootloader + tabla de particiones + ota_data + app) para flasheo a 0x0.
@@ -60,6 +61,17 @@ jobs:
             "notes": "LOADOUT $VER"
           }
           EOF
+
+      - name: Report build errors
+        if: failure()
+        shell: bash
+        run: |
+          # Publica los errores como anotaciones (legibles desde la API).
+          f="$GITHUB_WORKSPACE/build.log"
+          [ -f "$f" ] || exit 0
+          enc() { python3 -c 'import sys;print(sys.stdin.read().replace("%","%25").replace("\r","").replace("\n","%0A"))'; }
+          echo "::error title=build errors::$(grep -nE 'error|Error|ERROR|failed|FAILED|undefined reference|No version|Cannot|conflict' "$f" | grep -v -- '-Werror' | head -60 | enc)"
+          echo "::warning title=build log tail::$(tail -n 80 "$f" | enc)"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
