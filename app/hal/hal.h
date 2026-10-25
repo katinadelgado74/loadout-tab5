@@ -11,6 +11,7 @@
 #include <lvgl.h>
 #include <mutex>
 #include <vector>
+#include <deque>
 
 /**
  * @brief Hardware abstraction layer
@@ -495,6 +496,42 @@ public:
         if (newLine) {
             uartMonitorData.txQueue.push('\n');
         }
+    }
+
+    /* ----------------------------- RF sensor hub ------------------------------ */
+    // A separate ESP32 (WROOM/C5) wired to Grove Port A streams passive RF data
+    // in a compact line protocol; this struct holds the parsed state the RF LAB
+    // screen displays. The platform HAL fills it from a UART reader task.
+    struct RfHubData_t {
+        std::mutex mutex;
+        bool     linked      = false;   // heard valid data within the timeout
+        uint32_t lastRxMs    = 0;
+        bool     nrfFound    = false;   // radios the hub reported present
+        bool     ccFound     = false;
+        bool     enWifi = false, enS24 = false, enSub = false, enSubrx = false;
+        int      band        = 433;
+        int      spec24[126] = {0};     // 2.4 GHz spectrum, 0..9 per 1 MHz bin
+        uint32_t spec24Seq   = 0;
+        float    subStartMHz = 0.0f;    // sub-GHz sweep
+        float    subStepkHz  = 0.0f;
+        int      subN        = 0;
+        int      subRssi[64] = {0};
+        uint32_t subSeq      = 0;
+        uint32_t deauthWinMs = 0;       // deauth-flood detector (internal)
+        int      deauthCount = 0;
+        uint32_t alarmUntilMs = 0;
+        bool     alarm       = false;   // true while a deauth flood is active
+        std::deque<std::string> log;    // recent events, newest at back
+        uint32_t logSeq      = 0;
+        std::queue<uint8_t> txQueue;    // bytes queued to the hub
+    };
+    RfHubData_t rfHub;
+    virtual void rfHubBegin() {}
+    void rfHubSend(const std::string& cmd)
+    {
+        std::lock_guard<std::mutex> lock(rfHub.mutex);
+        for (char c : cmd) rfHub.txQueue.push((uint8_t)c);
+        rfHub.txQueue.push('\n');
     }
 };
 

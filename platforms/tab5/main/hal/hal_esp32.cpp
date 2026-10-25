@@ -120,6 +120,9 @@ void HalEsp32::init()
     mclog::tagInfo(_tag, "rs485 init");
     rs485_init();
 
+    mclog::tagInfo(_tag, "rf hub init");
+    rfHubBegin();
+
     mclog::tagInfo(_tag, "set gpio output capability");
     set_gpio_output_capability();
 

@@ -130,6 +130,7 @@ private:
     void set_gpio_output_capability();
     void hid_init();
     void rs485_init();
+    void rfHubBegin() override;
     bool wifi_init();
     void imu_init();
     void update_system_time();

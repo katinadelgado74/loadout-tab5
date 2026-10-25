@@ -77,7 +77,7 @@ static void apply_theme(int idx)
 // (IMU/GPIO/I2C/UART/Power) ya NO van en el grid: son IDs de routing que abre
 // la tarjeta "Tools" del sidebar.
 enum { G_LAUNCHER, G_OTA, G_FILES, G_CAMERA, G_MUSIC, G_ASK, G_COUNT,
-       G_IMU, G_GPIO, G_I2C, G_UART, G_POWERINFO };
+       G_IMU, G_GPIO, G_I2C, G_UART, G_POWERINFO, G_RFLAB };
 struct TileDef { const char* icon; const char* name; };
 static const TileDef GRID[G_COUNT] = {
     {FA_LAUNCHER, "LAUNCHER"},
@@ -1794,6 +1794,198 @@ private:
     std::unique_ptr<Label> _v, _a, _b;
 };
 
+/* ------------------------------ ventana RF LAB ---------------------------- */
+// Front-end for the external RF sensor hub (WROOM/C5 on Grove Port A). Module
+// on/off switches send commands to the hub; spectrum charts + event log show
+// what it streams back. All passive / receive-only on the hub side.
+class RfLabWindow : public ui::Window {
+public:
+    RfLabWindow()
+    {
+        config.title = "RF LAB"; config.bgColor = COL_CARD; config.borderColor = COL_BORDER;
+        config.titleColor = COL_TITLE; config.closeBtn = true;
+        config.kfClosed = {0, 0, 200, 140, 0}; config.kfOpened = {0, 0, 1120, 680, 255};
+    }
+    void onOpen() override
+    {
+        lv_obj_t* root = _window->get();
+
+        _status = lv_label_create(root);
+        lv_obj_align(_status, LV_ALIGN_TOP_LEFT, 24, 50);
+        lv_obj_set_style_text_font(_status, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(_status, lv_color_hex(0x7a8a82), 0);
+        lv_label_set_text(_status, "Link: waiting for hub on Port A (G53/G54) ...");
+
+        _alarm = lv_label_create(root);
+        lv_obj_align(_alarm, LV_ALIGN_TOP_RIGHT, -24, 50);
+        lv_obj_set_style_text_font(_alarm, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(_alarm, lv_color_hex(0xff5f57), 0);
+        lv_label_set_text(_alarm, LV_SYMBOL_WARNING "  DEAUTH FLOOD");
+        lv_obj_add_flag(_alarm, LV_OBJ_FLAG_HIDDEN);
+
+        static const char* cmd[4] = {"wifi", "s24", "sub", "subrx"};
+        for (int i = 0; i < 4; i++) {
+            _sw[i] = std::make_unique<Container>(root);
+            _sw[i]->setSize(172, 50); _sw[i]->setRadius(8);
+            _sw[i]->setBgColor(lv_color_hex(0x12241c)); _sw[i]->setBorderWidth(2);
+            _sw[i]->align(LV_ALIGN_TOP_LEFT, 24 + i * 182, 86);
+            _swLab[i] = std::make_unique<Label>(_sw[i]->get());
+            _swLab[i]->align(LV_ALIGN_CENTER, 0, 0);
+            _swLab[i]->setTextFont(&lv_font_montserrat_20);
+            std::string c = cmd[i];
+            _sw[i]->onClick().connect([this, i, c] {
+                _swOn[i] = !_swOn[i];
+                GetHAL()->rfHubSend(std::string("!") + c + "=" + (_swOn[i] ? "1" : "0"));
+                refresh_switch(i);
+            });
+            refresh_switch(i);
+        }
+
+        _bandTitle = lv_label_create(root);
+        lv_obj_align(_bandTitle, LV_ALIGN_TOP_LEFT, 772, 62);
+        lv_obj_set_style_text_font(_bandTitle, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(_bandTitle, lv_color_hex(COL_LABEL), 0);
+        lv_label_set_text(_bandTitle, "sub-GHz band (MHz)");
+        static const int bands[4] = {315, 433, 868, 915};
+        for (int i = 0; i < 4; i++) {
+            _band[i] = std::make_unique<Container>(root);
+            _band[i]->setSize(78, 44); _band[i]->setRadius(8);
+            _band[i]->setBgColor(lv_color_hex(0x12241c)); _band[i]->setBorderWidth(2);
+            _band[i]->align(LV_ALIGN_TOP_LEFT, 772 + i * 84, 86);
+            _bandLab[i] = std::make_unique<Label>(_band[i]->get());
+            _bandLab[i]->align(LV_ALIGN_CENTER, 0, 0);
+            _bandLab[i]->setTextFont(&lv_font_montserrat_20);
+            _bandLab[i]->setText(std::to_string(bands[i]));
+            int b = bands[i];
+            _band[i]->onClick().connect([this, i, b] {
+                _bandSel = i;
+                GetHAL()->rfHubSend(std::string("!band=") + std::to_string(b));
+                refresh_bands();
+            });
+        }
+        refresh_bands();
+
+        _lbl24 = lv_label_create(root);
+        lv_obj_align(_lbl24, LV_ALIGN_TOP_LEFT, 24, 150);
+        lv_obj_set_style_text_font(_lbl24, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(_lbl24, lv_color_hex(COL_LABEL), 0);
+        lv_label_set_text(_lbl24, "2.4 GHz spectrum  (2400 - 2525 MHz, 1 MHz bins)");
+        _c24 = lv_chart_create(root);
+        lv_obj_set_size(_c24, 1072, 150);
+        lv_obj_align(_c24, LV_ALIGN_TOP_LEFT, 24, 174);
+        lv_chart_set_type(_c24, LV_CHART_TYPE_BAR);
+        lv_chart_set_point_count(_c24, 126);
+        lv_chart_set_range(_c24, LV_CHART_AXIS_PRIMARY_Y, 0, 9);
+        lv_chart_set_div_line_count(_c24, 0, 0);
+        _s24 = lv_chart_add_series(_c24, lv_color_hex(0x38ef7d), LV_CHART_AXIS_PRIMARY_Y);
+        for (int i = 0; i < 126; i++) lv_chart_set_value_by_id(_c24, _s24, i, 0);
+
+        _lblSub = lv_label_create(root);
+        lv_obj_align(_lblSub, LV_ALIGN_TOP_LEFT, 24, 336);
+        lv_obj_set_style_text_font(_lblSub, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(_lblSub, lv_color_hex(COL_LABEL), 0);
+        lv_label_set_text(_lblSub, "sub-GHz RSSI sweep");
+        _cSub = lv_chart_create(root);
+        lv_obj_set_size(_cSub, 1072, 110);
+        lv_obj_align(_cSub, LV_ALIGN_TOP_LEFT, 24, 360);
+        lv_chart_set_type(_cSub, LV_CHART_TYPE_LINE);
+        lv_chart_set_point_count(_cSub, 64);
+        lv_chart_set_range(_cSub, LV_CHART_AXIS_PRIMARY_Y, -110, -20);
+        lv_chart_set_div_line_count(_cSub, 0, 0);
+        _sSub = lv_chart_add_series(_cSub, lv_color_hex(0x43d2ff), LV_CHART_AXIS_PRIMARY_Y);
+        for (int i = 0; i < 64; i++) lv_chart_set_value_by_id(_cSub, _sSub, i, -110);
+
+        _log = lv_label_create(root);
+        lv_label_set_long_mode(_log, LV_LABEL_LONG_WRAP);
+        lv_obj_set_size(_log, 1072, 190);
+        lv_obj_align(_log, LV_ALIGN_TOP_LEFT, 24, 480);
+        lv_obj_set_style_text_font(_log, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(_log, lv_color_hex(0x9be8b8), 0);
+        lv_label_set_text(_log, "Events appear here. Flip a switch above to enable a module on the hub.");
+    }
+
+    void onUpdate() override
+    {
+        if (_state != Opened) return;
+        auto& d = GetHAL()->rfHub;
+        std::lock_guard<std::mutex> lk(d.mutex);
+
+        if (_status) {
+            if (d.linked) {
+                char s[128];
+                snprintf(s, sizeof(s), "Link: hub connected   nRF24=%s   CC1101=%s",
+                         d.nrfFound ? "yes" : "no", d.ccFound ? "yes" : "no");
+                lv_label_set_text(_status, s);
+                lv_obj_set_style_text_color(_status, lv_color_hex(0x38ef7d), 0);
+            } else {
+                lv_label_set_text(_status, "Link: no hub  (Port A: G53<-hubTX, G54->hubRX, 5V, GND)");
+                lv_obj_set_style_text_color(_status, lv_color_hex(0xff8a80), 0);
+            }
+        }
+        if (_alarm) {
+            if (d.alarm) lv_obj_clear_flag(_alarm, LV_OBJ_FLAG_HIDDEN);
+            else         lv_obj_add_flag(_alarm, LV_OBJ_FLAG_HIDDEN);
+        }
+        if (_c24 && d.spec24Seq != _seen24) {
+            _seen24 = d.spec24Seq;
+            for (int i = 0; i < 126; i++) lv_chart_set_value_by_id(_c24, _s24, i, d.spec24[i]);
+            lv_chart_refresh(_c24);
+        }
+        if (_cSub && d.subSeq != _seenSub) {
+            _seenSub = d.subSeq;
+            int n = d.subN; if (n > 64) n = 64;
+            for (int i = 0; i < 64; i++) lv_chart_set_value_by_id(_cSub, _sSub, i, (i < n) ? d.subRssi[i] : -110);
+            lv_chart_refresh(_cSub);
+            if (_lblSub && n > 0) {
+                char s[96];
+                snprintf(s, sizeof(s), "sub-GHz RSSI sweep  (%.2f MHz +, %.0f kHz step)", d.subStartMHz, d.subStepkHz);
+                lv_label_set_text(_lblSub, s);
+            }
+        }
+        if (_log && d.logSeq != _seenLog) {
+            _seenLog = d.logSeq;
+            std::string txt; int start = (int)d.log.size() - 11; if (start < 0) start = 0;
+            for (int i = start; i < (int)d.log.size(); i++) { txt += d.log[i]; txt += "\n"; }
+            if (!txt.empty()) lv_label_set_text(_log, txt.c_str());
+        }
+    }
+
+    void onClose() override
+    {
+        for (int i = 0; i < 4; i++) { _swLab[i].reset(); _sw[i].reset(); _bandLab[i].reset(); _band[i].reset(); }
+        auto del = [](lv_obj_t*& o){ if (o) { lv_obj_del(o); o = nullptr; } };
+        del(_status); del(_alarm); del(_bandTitle);
+        del(_lbl24); del(_c24); del(_lblSub); del(_cSub); del(_log);
+    }
+
+private:
+    void refresh_switch(int i)
+    {
+        static const char* nm[4] = {"WIFI", "2.4G SPEC", "SUB SPEC", "SUB RX"};
+        uint32_t col = _swOn[i] ? COL_ACCENT : 0x4a5a52;
+        _sw[i]->setBorderColor(lv_color_hex(col));
+        _swLab[i]->setTextColor(lv_color_hex(col));
+        _swLab[i]->setText(std::string(nm[i]) + (_swOn[i] ? ": ON" : ": OFF"));
+    }
+    void refresh_bands()
+    {
+        for (int i = 0; i < 4; i++) {
+            uint32_t col = (i == _bandSel) ? COL_ACCENT : 0x4a5a52;
+            _band[i]->setBorderColor(lv_color_hex(col));
+            _bandLab[i]->setTextColor(lv_color_hex(col));
+        }
+    }
+    std::unique_ptr<Container> _sw[4], _band[4];
+    std::unique_ptr<Label> _swLab[4], _bandLab[4];
+    bool _swOn[4] = {false, false, false, false};
+    int  _bandSel = 1;   // default 433 MHz
+    lv_obj_t* _status = nullptr; lv_obj_t* _alarm = nullptr; lv_obj_t* _bandTitle = nullptr;
+    lv_obj_t* _lbl24 = nullptr; lv_obj_t* _c24 = nullptr; lv_chart_series_t* _s24 = nullptr;
+    lv_obj_t* _lblSub = nullptr; lv_obj_t* _cSub = nullptr; lv_chart_series_t* _sSub = nullptr;
+    lv_obj_t* _log = nullptr;
+    uint32_t _seen24 = 0, _seenSub = 0, _seenLog = 0;
+};
+
 /* ----------------------------- ventana Tools ------------------------------ */
 class ToolsWindow : public ui::Window {
 public:
@@ -1814,10 +2006,12 @@ public:
             {FA_UART,      "UART MONITOR", G_UART,      0xc0c8c4},
             {FA_POWERINFO, "POWER (V/A)",  G_POWERINFO, 0xff8a80},
             {FA_CAMERA,    "SCREEN REC",   TOOL_SCREENREC, 0xff5f57},
+            {FA_UART,      "RF LAB",       G_RFLAB,     0x38ef7d},
         };
+        const int ITEM_COUNT = sizeof(items) / sizeof(items[0]);
         _grp = lv_group_create();
         lv_group_set_wrap(_grp, true);
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < ITEM_COUNT; i++) {
             Item it = items[i];
             auto card = std::make_unique<Container>(root);
             card->setSize(360, 78); card->setRadius(10);
@@ -2324,6 +2518,7 @@ void LauncherView::open_tile(int index)
     else if (index == A_ABOUT)    _window = std::make_unique<AboutWindow>();
     else if (index == A_TOOLS)    _window = std::make_unique<ToolsWindow>();
     else if (index == G_POWERINFO)_window = std::make_unique<PowerInfoWindow>();
+    else if (index == G_RFLAB)    _window = std::make_unique<RfLabWindow>();
     else {
         const char* nm = (index >= 0 && index < G_COUNT) ? GRID[index].name : "Unknown";
         _window = std::make_unique<InfoWindow>(nm, "Coming soon");
