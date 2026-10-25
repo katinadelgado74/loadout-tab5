@@ -77,7 +77,7 @@ static void apply_theme(int idx)
 // (IMU/GPIO/I2C/UART/Power) ya NO van en el grid: son IDs de routing que abre
 // la tarjeta "Tools" del sidebar.
 enum { G_LAUNCHER, G_SDR, G_FILES, G_CAMERA, G_MUSIC, G_ASK, G_COUNT,
-       G_IMU, G_GPIO, G_I2C, G_UART, G_POWERINFO, G_RFLAB };
+       G_IMU, G_GPIO, G_I2C, G_UART, G_POWERINFO, G_RFLAB, G_WIFIAN };
 struct TileDef { const char* icon; const char* name; };
 static const TileDef GRID[G_COUNT] = {
     {FA_LAUNCHER, "LAUNCHER"},
@@ -1898,35 +1898,46 @@ public:
         lv_label_set_text(_alarm, LV_SYMBOL_WARNING "  DEAUTH FLOOD");
         lv_obj_add_flag(_alarm, LV_OBJ_FLAG_HIDDEN);
 
-        static const char* cmd[4] = {"wifi", "s24", "sub", "subrx"};
-        for (int i = 0; i < 4; i++) {
+        // WIFI (monitor) and STATION are mutually exclusive (one radio).
+        static const char* cmd[5] = {"wifi", "sta", "s24", "sub", "subrx"};
+        for (int i = 0; i < 5; i++) {
             _sw[i] = std::make_unique<Container>(root);
-            _sw[i]->setSize(172, 50); _sw[i]->setRadius(8);
+            _sw[i]->setSize(148, 50); _sw[i]->setRadius(8);
             _sw[i]->setBgColor(lv_color_hex(0x12241c)); _sw[i]->setBorderWidth(2);
-            _sw[i]->align(LV_ALIGN_TOP_LEFT, 24 + i * 182, 86);
+            _sw[i]->align(LV_ALIGN_TOP_LEFT, 24 + i * 154, 86);
             _swLab[i] = std::make_unique<Label>(_sw[i]->get());
             _swLab[i]->align(LV_ALIGN_CENTER, 0, 0);
             _swLab[i]->setTextFont(&lv_font_montserrat_20);
             std::string c = cmd[i];
             _sw[i]->onClick().connect([this, i, c] {
                 _swOn[i] = !_swOn[i];
-                GetHAL()->rfHubSend(std::string("!") + c + "=" + (_swOn[i] ? "1" : "0"));
+                if (c == "sta") {
+                    if (_swOn[i]) {
+                        GetHAL()->rfHubSend(std::string("!ssid=") + GetHAL()->getSettingStr("sta_ssid", ""));
+                        GetHAL()->rfHubSend(std::string("!pw=")   + GetHAL()->getSettingStr("sta_pass", ""));
+                        GetHAL()->rfHubSend("!sta=1");
+                        _swOn[0] = false; refresh_switch(0);   // monitor off (exclusive)
+                    } else GetHAL()->rfHubSend("!sta=0");
+                } else {
+                    GetHAL()->rfHubSend(std::string("!") + c + "=" + (_swOn[i] ? "1" : "0"));
+                    if (c == "wifi" && _swOn[i]) { _swOn[1] = false; refresh_switch(1); } // station off
+                }
                 refresh_switch(i);
             });
             refresh_switch(i);
         }
 
         _bandTitle = lv_label_create(root);
-        lv_obj_align(_bandTitle, LV_ALIGN_TOP_LEFT, 772, 62);
+        lv_obj_align(_bandTitle, LV_ALIGN_TOP_LEFT, 806, 62);
         lv_obj_set_style_text_font(_bandTitle, &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_color(_bandTitle, lv_color_hex(COL_LABEL), 0);
         lv_label_set_text(_bandTitle, "sub-GHz band (MHz)");
         static const int bands[4] = {315, 433, 868, 915};
         for (int i = 0; i < 4; i++) {
             _band[i] = std::make_unique<Container>(root);
-            _band[i]->setSize(78, 44); _band[i]->setRadius(8);
+            _band[i]->setSize(70, 44); _band[i]->setRadius(8);
             _band[i]->setBgColor(lv_color_hex(0x12241c)); _band[i]->setBorderWidth(2);
-            _band[i]->align(LV_ALIGN_TOP_LEFT, 772 + i * 84, 86);
+            _band[i]->align(LV_ALIGN_TOP_LEFT, 806 + i * 76, 86);
             _bandLab[i] = std::make_unique<Label>(_band[i]->get());
             _bandLab[i]->align(LV_ALIGN_CENTER, 0, 0);
             _bandLab[i]->setTextFont(&lv_font_montserrat_20);
@@ -1987,11 +1998,17 @@ public:
 
         if (_status) {
             if (d.linked) {
-                char s[128];
-                snprintf(s, sizeof(s), "Link: hub connected   nRF24=%s   CC1101=%s",
-                         d.nrfFound ? "yes" : "no", d.ccFound ? "yes" : "no");
+                char s[160];
+                if (strcmp(d.staState, "off") != 0) {
+                    snprintf(s, sizeof(s), "STATION: %s   %s   %ddBm   (%s)",
+                             d.staState, d.staIp, d.staRssi, d.staSsid[0] ? d.staSsid : "-");
+                } else {
+                    snprintf(s, sizeof(s), "Link: hub connected   nRF24=%s   CC1101=%s",
+                             d.nrfFound ? "yes" : "no", d.ccFound ? "yes" : "no");
+                }
                 lv_label_set_text(_status, s);
-                lv_obj_set_style_text_color(_status, lv_color_hex(0x38ef7d), 0);
+                uint32_t col = (strcmp(d.staState, "failed") == 0) ? 0xff8a80 : 0x38ef7d;
+                lv_obj_set_style_text_color(_status, lv_color_hex(col), 0);
             } else {
                 lv_label_set_text(_status, "Link: no hub  (M5-Bus: G48<-hubTX, G47->hubRX, 5V, GND)");
                 lv_obj_set_style_text_color(_status, lv_color_hex(0xff8a80), 0);
@@ -2036,7 +2053,7 @@ public:
 private:
     void refresh_switch(int i)
     {
-        static const char* nm[4] = {"WIFI", "2.4G SPEC", "SUB SPEC", "SUB RX"};
+        static const char* nm[5] = {"WIFI", "STATION", "2.4G", "SUB", "SUBRX"};
         uint32_t col = _swOn[i] ? COL_ACCENT : 0x4a5a52;
         _sw[i]->setBorderColor(lv_color_hex(col));
         _swLab[i]->setTextColor(lv_color_hex(col));
@@ -2050,15 +2067,107 @@ private:
             _bandLab[i]->setTextColor(lv_color_hex(col));
         }
     }
-    std::unique_ptr<Container> _sw[4], _band[4];
-    std::unique_ptr<Label> _swLab[4], _bandLab[4];
-    bool _swOn[4] = {false, false, false, false};
+    std::unique_ptr<Container> _sw[5], _band[4];
+    std::unique_ptr<Label> _swLab[5], _bandLab[4];
+    bool _swOn[5] = {false, false, false, false, false};
     int  _bandSel = 1;   // default 433 MHz
     lv_obj_t* _status = nullptr; lv_obj_t* _alarm = nullptr; lv_obj_t* _bandTitle = nullptr;
     lv_obj_t* _lbl24 = nullptr; lv_obj_t* _c24 = nullptr; lv_chart_series_t* _s24 = nullptr;
     lv_obj_t* _lblSub = nullptr; lv_obj_t* _cSub = nullptr; lv_chart_series_t* _sSub = nullptr;
     lv_obj_t* _log = nullptr;
     uint32_t _seen24 = 0, _seenSub = 0, _seenLog = 0;
+};
+
+/* --------------------------- ventana WiFi Analyzer ------------------------ */
+// Vista agregada de los AP que oye el hub en modo monitor: barras de AP por
+// canal + lista de AP cercanos. Se llena con WIFI monitor activo en RF LAB.
+class WifiAnalyzerWindow : public ui::Window {
+public:
+    WifiAnalyzerWindow()
+    {
+        config.title = "WIFI ANALYZER"; config.bgColor = COL_CARD; config.borderColor = COL_BORDER;
+        config.titleColor = COL_TITLE; config.closeBtn = true;
+        config.kfClosed = {0, 0, 200, 140, 0}; config.kfOpened = {0, 0, 1020, 660, 255};
+    }
+    void onOpen() override
+    {
+        lv_obj_t* root = _window->get();
+        _hint = lv_label_create(root);
+        lv_obj_align(_hint, LV_ALIGN_TOP_LEFT, 24, 50);
+        lv_obj_set_style_text_font(_hint, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(_hint, lv_color_hex(0x7a8a82), 0);
+        lv_label_set_text(_hint, "Turn on WIFI monitor in RF LAB to populate.  2.4 GHz, channels 1-14.");
+
+        _chanLbl = lv_label_create(root);
+        lv_obj_align(_chanLbl, LV_ALIGN_TOP_LEFT, 24, 82);
+        lv_obj_set_style_text_font(_chanLbl, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(_chanLbl, lv_color_hex(COL_LABEL), 0);
+        lv_label_set_text(_chanLbl, "Access points per channel");
+
+        _chart = lv_chart_create(root);
+        lv_obj_set_size(_chart, 972, 180);
+        lv_obj_align(_chart, LV_ALIGN_TOP_LEFT, 24, 110);
+        lv_chart_set_type(_chart, LV_CHART_TYPE_BAR);
+        lv_chart_set_point_count(_chart, 14);
+        lv_chart_set_range(_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 6);
+        lv_chart_set_div_line_count(_chart, 0, 0);
+        _ser = lv_chart_add_series(_chart, lv_color_hex(0x38ef7d), LV_CHART_AXIS_PRIMARY_Y);
+        for (int i = 0; i < 14; i++) lv_chart_set_value_by_id(_chart, _ser, i, 0);
+
+        _apLbl = lv_label_create(root);
+        lv_obj_align(_apLbl, LV_ALIGN_TOP_LEFT, 24, 316);
+        lv_obj_set_style_text_font(_apLbl, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(_apLbl, lv_color_hex(COL_LABEL), 0);
+        lv_label_set_text(_apLbl, "Nearby access points  (ch / signal / name)");
+
+        _list = lv_label_create(root);
+        lv_label_set_long_mode(_list, LV_LABEL_LONG_WRAP);
+        lv_obj_set_size(_list, 972, 300);
+        lv_obj_align(_list, LV_ALIGN_TOP_LEFT, 24, 348);
+        lv_obj_set_style_text_font(_list, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(_list, lv_color_hex(0x9be8b8), 0);
+        lv_label_set_text(_list, "No access points yet.");
+    }
+    void onUpdate() override
+    {
+        if (_state != Opened) return;
+        auto& d = GetHAL()->rfHub;
+        std::lock_guard<std::mutex> lk(d.mutex);
+        if (d.apSeq == _seen) return;
+        _seen = d.apSeq;
+
+        int cnt[15] = {0}; int mx = 4;
+        for (int i = 0; i < d.apCount; i++) {
+            int ch = d.apList[i].ch;
+            if (ch >= 1 && ch <= 14) { cnt[ch]++; if (cnt[ch] > mx) mx = cnt[ch]; }
+        }
+        lv_chart_set_range(_chart, LV_CHART_AXIS_PRIMARY_Y, 0, mx);
+        for (int i = 0; i < 14; i++) lv_chart_set_value_by_id(_chart, _ser, i, cnt[i + 1]);
+        lv_chart_refresh(_chart);
+
+        int idx[40]; int n = d.apCount; for (int i = 0; i < n; i++) idx[i] = i;
+        for (int a = 0; a < n; a++) for (int b = a + 1; b < n; b++)
+            if (d.apList[idx[b]].rssi > d.apList[idx[a]].rssi) { int t = idx[a]; idx[a] = idx[b]; idx[b] = t; }
+        std::string txt; char row[80];
+        int shown = n < 16 ? n : 16;
+        for (int i = 0; i < shown; i++) {
+            auto& ap = d.apList[idx[i]];
+            snprintf(row, sizeof(row), "ch%-3d %4ddBm  %s\n", ap.ch, ap.rssi, ap.ssid[0] ? ap.ssid : "<hidden>");
+            txt += row;
+        }
+        if (txt.empty()) txt = "No access points yet.";
+        lv_label_set_text(_list, txt.c_str());
+    }
+    void onClose() override
+    {
+        auto del = [](lv_obj_t*& o){ if (o) { lv_obj_del(o); o = nullptr; } };
+        del(_hint); del(_chanLbl); del(_chart); del(_apLbl); del(_list);
+    }
+private:
+    lv_obj_t* _hint = nullptr; lv_obj_t* _chanLbl = nullptr;
+    lv_obj_t* _chart = nullptr; lv_chart_series_t* _ser = nullptr;
+    lv_obj_t* _apLbl = nullptr; lv_obj_t* _list = nullptr;
+    uint32_t _seen = 0xFFFFFFFF;
 };
 
 /* ----------------------------- ventana Tools ------------------------------ */
@@ -2082,6 +2191,7 @@ public:
             {FA_POWERINFO, "POWER (V/A)",  G_POWERINFO, 0xff8a80},
             {FA_CAMERA,    "SCREEN REC",   TOOL_SCREENREC, 0xff5f57},
             {FA_UART,      "RF LAB",       G_RFLAB,     0x38ef7d},
+            {FA_UART,      "WIFI ANALYZER",G_WIFIAN,    0x43d2ff},
         };
         const int ITEM_COUNT = sizeof(items) / sizeof(items[0]);
         _grp = lv_group_create();
@@ -2594,6 +2704,7 @@ void LauncherView::open_tile(int index)
     else if (index == A_TOOLS)    _window = std::make_unique<ToolsWindow>();
     else if (index == G_POWERINFO)_window = std::make_unique<PowerInfoWindow>();
     else if (index == G_RFLAB)    _window = std::make_unique<RfLabWindow>();
+    else if (index == G_WIFIAN)   _window = std::make_unique<WifiAnalyzerWindow>();
     else {
         const char* nm = (index >= 0 && index < G_COUNT) ? GRID[index].name : "Unknown";
         _window = std::make_unique<InfoWindow>(nm, "Coming soon");

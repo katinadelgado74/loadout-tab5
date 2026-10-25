@@ -521,6 +521,16 @@ public:
         int      deauthCount = 0;
         uint32_t alarmUntilMs = 0;
         bool     alarm       = false;   // true while a deauth flood is active
+        // STATION mode (WROOM joins home Wi-Fi so the Tab5 can use the net)
+        char     staState[16] = "off";  // off | connecting | connected | failed
+        char     staIp[16]    = "0.0.0.0";
+        int      staRssi      = 0;
+        char     staSsid[33]  = "";
+        // AP table for the Wi-Fi analyzer (built from beacon/probe-resp lines)
+        struct ApInfo_t { char bssid[18]; char ssid[33]; int ch; int rssi; uint32_t lastMs; };
+        ApInfo_t apList[40];
+        int      apCount     = 0;
+        uint32_t apSeq       = 0;
         std::deque<std::string> log;    // recent events, newest at back
         uint32_t logSeq      = 0;
         std::queue<uint8_t> txQueue;    // bytes queued to the hub

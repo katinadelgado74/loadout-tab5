@@ -58,6 +58,22 @@ static void rf_push_log(hal::HalBase::RfHubData_t& d, const std::string& s)
     d.logSeq++;
 }
 
+// caller holds the lock: insert/update an AP in the analyzer table
+static void rf_upsert_ap(hal::HalBase::RfHubData_t& d, const std::string& bssid,
+                         const std::string& ssid, int ch, int rssi)
+{
+    int slot = -1, oldest = 0; uint32_t ot = 0xFFFFFFFF;
+    for (int i = 0; i < d.apCount; i++) {
+        if (strncmp(d.apList[i].bssid, bssid.c_str(), 17) == 0) { slot = i; break; }
+        if (d.apList[i].lastMs < ot) { ot = d.apList[i].lastMs; oldest = i; }
+    }
+    if (slot < 0) slot = (d.apCount < 40) ? d.apCount++ : oldest;
+    strncpy(d.apList[slot].bssid, bssid.c_str(), 17); d.apList[slot].bssid[17] = 0;
+    strncpy(d.apList[slot].ssid,  ssid.c_str(),  32); d.apList[slot].ssid[32]  = 0;
+    d.apList[slot].ch = ch; d.apList[slot].rssi = rssi; d.apList[slot].lastMs = rf_now_ms();
+    d.apSeq++;
+}
+
 static void rf_parse(const std::string& ln)
 {
     if (ln.empty()) return;
@@ -100,7 +116,18 @@ static void rf_parse(const std::string& ln)
         d.subSeq++;
         return;
     }
-    if (tag == 'B' && f.size() >= 5) { rf_push_log(d, "AP   ch" + f[1] + " " + f[2] + "dBm " + f[4] + " [" + f[3] + "]"); return; }
+    if (f[0] == "WST" && f.size() >= 2) {
+        strncpy(d.staState, f[1].c_str(), sizeof(d.staState) - 1); d.staState[sizeof(d.staState) - 1] = 0;
+        if (f.size() >= 3) { strncpy(d.staIp, f[2].c_str(), sizeof(d.staIp) - 1); d.staIp[sizeof(d.staIp) - 1] = 0; }
+        if (f.size() >= 4) d.staRssi = atoi(f[3].c_str());
+        if (f.size() >= 5) { strncpy(d.staSsid, f[4].c_str(), sizeof(d.staSsid) - 1); d.staSsid[sizeof(d.staSsid) - 1] = 0; }
+        return;
+    }
+    if (tag == 'B' && f.size() >= 5) {
+        rf_upsert_ap(d, f[3], f[4], atoi(f[1].c_str()), atoi(f[2].c_str()));
+        rf_push_log(d, "AP   ch" + f[1] + " " + f[2] + "dBm " + f[4] + " [" + f[3] + "]");
+        return;
+    }
     if (tag == 'P' && f.size() >= 5) { rf_push_log(d, "probe ch" + f[1] + " " + f[2] + "dBm \"" + f[4] + "\""); return; }
     if ((tag == 'D' || tag == 'X') && f.size() >= 6) {
         rf_push_log(d, std::string(tag == 'D' ? "DEAUTH" : "disasc") + " ch" + f[1] + " " + f[2] + "dBm " + f[3] + " r" + f[5]);
