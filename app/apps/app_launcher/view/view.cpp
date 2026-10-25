@@ -77,7 +77,7 @@ static void apply_theme(int idx)
 // (IMU/GPIO/I2C/UART/Power) ya NO van en el grid: son IDs de routing que abre
 // la tarjeta "Tools" del sidebar.
 enum { G_LAUNCHER, G_SDR, G_FILES, G_CAMERA, G_MUSIC, G_ASK, G_COUNT,
-       G_IMU, G_GPIO, G_I2C, G_UART, G_POWERINFO, G_WIFIAN, G_NRF, G_CC1101 };
+       G_IMU, G_GPIO, G_I2C, G_UART, G_POWERINFO, G_WIFIAN, G_NRF, G_CC1101, G_AP };
 struct TileDef { const char* icon; const char* name; };
 static const TileDef GRID[G_COUNT] = {
     {FA_LAUNCHER, "LAUNCHER"},
@@ -1901,11 +1901,10 @@ public:
         lv_label_set_text(_alarm, LV_SYMBOL_WARNING "  DEAUTH FLOOD");
         lv_obj_add_flag(_alarm, LV_OBJ_FLAG_HIDDEN);
 
-        // MONITOR/STATION/RELAY drive the WROOM hub (one radio: monitor and
-        // station are mutually exclusive). AP toggles the Tab5's own settings
-        // access point so it isn't always broadcasting.
-        static const char* cmd[4] = {"wifi", "sta", "api", "ap"};
-        for (int i = 0; i < 4; i++) {
+        // MONITOR and STATION are mutually exclusive on the hub (single radio).
+        // AI RELAY brings station up and turns the hub's chat relay on in one tap.
+        static const char* cmd[3] = {"wifi", "sta", "api"};
+        for (int i = 0; i < 3; i++) {
             _sw[i] = std::make_unique<Container>(root);
             _sw[i]->setSize(190, 50); _sw[i]->setRadius(8);
             _sw[i]->setBgColor(lv_color_hex(0x12241c)); _sw[i]->setBorderWidth(2);
@@ -1915,7 +1914,6 @@ public:
             _swLab[i]->setTextFont(&lv_font_montserrat_20);
             std::string c = cmd[i];
             _sw[i]->onClick().connect([this, c] {
-                if (c == "ap") { GetHAL()->apSet(!GetHAL()->apOn()); return; }  // Tab5 settings AP
                 auto& d = GetHAL()->rfHub;
                 bool on;
                 { std::lock_guard<std::mutex> lk(d.mutex);
@@ -2040,7 +2038,7 @@ public:
     }
     void onClose() override
     {
-        for (int i = 0; i < 4; i++) { _swLab[i].reset(); _sw[i].reset(); }
+        for (int i = 0; i < 3; i++) { _swLab[i].reset(); _sw[i].reset(); }
         auto del = [](lv_obj_t*& o){ if (o) { lv_obj_del(o); o = nullptr; } };
         del(_status); del(_alarm); del(_chanLbl); del(_chart);
         del(_apLbl); del(_list); del(_logLbl); del(_log);
@@ -2049,9 +2047,9 @@ private:
     void refresh_switches()
     {
         auto& d = GetHAL()->rfHub;
-        bool on[4] = { (bool)d.enWifi, strcmp(d.staState, "off") != 0, (bool)d.enApi, GetHAL()->apOn() };
-        static const char* nm[4] = {"MONITOR", "STATION", "AI RELAY", "AP"};
-        for (int i = 0; i < 4; i++) {
+        bool on[3] = { (bool)d.enWifi, strcmp(d.staState, "off") != 0, (bool)d.enApi };
+        static const char* nm[3] = {"MONITOR", "STATION", "AI RELAY"};
+        for (int i = 0; i < 3; i++) {
             if (!_sw[i]) continue;
             uint32_t col = on[i] ? COL_ACCENT : 0x4a5a52;
             _sw[i]->setBorderColor(lv_color_hex(col));
@@ -2059,8 +2057,8 @@ private:
             _swLab[i]->setText(std::string(nm[i]) + (on[i] ? ": ON" : ": OFF"));
         }
     }
-    std::unique_ptr<Container> _sw[4];
-    std::unique_ptr<Label> _swLab[4];
+    std::unique_ptr<Container> _sw[3];
+    std::unique_ptr<Label> _swLab[3];
     lv_obj_t* _status = nullptr; lv_obj_t* _alarm = nullptr;
     lv_obj_t* _chanLbl = nullptr; lv_obj_t* _chart = nullptr; lv_chart_series_t* _ser = nullptr;
     lv_obj_t* _apLbl = nullptr; lv_obj_t* _list = nullptr;
@@ -2325,6 +2323,90 @@ private:
     uint32_t _seenSub = 0, _seenLog = 0;
 };
 
+/* --------------------------- ventana Access Point ------------------------- */
+// On/off for the Tab5's own settings access point (the LOADOUT SoftAP + web
+// dashboard). Separate from the RF hub: this is the Tab5 broadcasting its own
+// Wi-Fi so a phone/laptop can open the settings page.
+class ApWindow : public ui::Window {
+public:
+    ApWindow()
+    {
+        config.title = "ACCESS POINT"; config.bgColor = COL_CARD; config.borderColor = COL_BORDER;
+        config.titleColor = COL_TITLE; config.closeBtn = true;
+        config.kfClosed = {0, 0, 200, 140, 0}; config.kfOpened = {0, 0, 900, 520, 255};
+    }
+    void onOpen() override
+    {
+        lv_obj_t* root = _window->get();
+
+        _desc = lv_label_create(root);
+        lv_label_set_long_mode(_desc, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(_desc, 852);
+        lv_obj_align(_desc, LV_ALIGN_TOP_LEFT, 24, 50);
+        lv_obj_set_style_text_font(_desc, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(_desc, lv_color_hex(0x9aa8a0), 0);
+        lv_label_set_text(_desc,
+            "The LOADOUT settings dashboard is served over this access point. "
+            "Turn it off when you're not changing settings so the Tab5 isn't broadcasting its own Wi-Fi.");
+
+        _sw = std::make_unique<Container>(root);
+        _sw->setSize(260, 64); _sw->setRadius(10);
+        _sw->setBgColor(lv_color_hex(0x12241c)); _sw->setBorderWidth(2);
+        _sw->align(LV_ALIGN_TOP_LEFT, 24, 120);
+        _swLab = std::make_unique<Label>(_sw->get());
+        _swLab->align(LV_ALIGN_CENTER, 0, 0);
+        _swLab->setTextFont(&lv_font_montserrat_24);
+        _sw->onClick().connect([this] { GetHAL()->apSet(!GetHAL()->apOn()); });
+
+        _info = lv_label_create(root);
+        lv_label_set_long_mode(_info, LV_LABEL_LONG_WRAP);
+        lv_obj_set_width(_info, 852);
+        lv_obj_align(_info, LV_ALIGN_TOP_LEFT, 24, 210);
+        lv_obj_set_style_text_font(_info, &lv_font_montserrat_20, 0);
+        lv_obj_set_style_text_color(_info, lv_color_hex(0x9be8b8), 0);
+        lv_label_set_text(_info, "");
+
+        refresh();
+    }
+    void onUpdate() override
+    {
+        if (_state != Opened) return;
+        refresh();
+    }
+    void onClose() override
+    {
+        _swLab.reset(); _sw.reset();
+        auto del = [](lv_obj_t*& o){ if (o) { lv_obj_del(o); o = nullptr; } };
+        del(_desc); del(_info);
+    }
+private:
+    void refresh()
+    {
+        bool on = GetHAL()->apOn();
+        if (_sw) {
+            uint32_t col = on ? COL_ACCENT : 0x4a5a52;
+            _sw->setBorderColor(lv_color_hex(col));
+            _swLab->setTextColor(lv_color_hex(col));
+            _swLab->setText(std::string("AP: ") + (on ? "ON" : "OFF"));
+        }
+        if (_info) {
+            if (on) {
+                std::string pass = GetHAL()->getSettingStr("wifi_pass", "loadout1234");
+                lv_label_set_text(_info,
+                    ("Broadcasting now.\n\nJoin Wi-Fi:  LOADOUT\nPassword:  " + pass +
+                     "\nThen open:  http://192.168.4.1").c_str());
+                lv_obj_set_style_text_color(_info, lv_color_hex(0x9be8b8), 0);
+            } else {
+                lv_label_set_text(_info, "Access point is off - not broadcasting. Tap AP to turn it back on.");
+                lv_obj_set_style_text_color(_info, lv_color_hex(0x9aa8a0), 0);
+            }
+        }
+    }
+    std::unique_ptr<Container> _sw;
+    std::unique_ptr<Label> _swLab;
+    lv_obj_t* _desc = nullptr; lv_obj_t* _info = nullptr;
+};
+
 /* ----------------------------- ventana Tools ------------------------------ */
 class ToolsWindow : public ui::Window {
 public:
@@ -2348,6 +2430,7 @@ public:
             {FA_UART,      "WIFI ANALYZER",G_WIFIAN,    0x38ef7d},
             {FA_UART,      "NRF24 2.4G",   G_NRF,       0x43d2ff},
             {FA_UART,      "CC1101 SUB",   G_CC1101,    0xffb86c},
+            {FA_GPIO,      "ACCESS POINT", G_AP,        0xc0c8c4},
         };
         const int ITEM_COUNT = sizeof(items) / sizeof(items[0]);
         _grp = lv_group_create();
@@ -2862,6 +2945,7 @@ void LauncherView::open_tile(int index)
     else if (index == G_WIFIAN)   _window = std::make_unique<WifiAnalyzerWindow>();
     else if (index == G_NRF)      _window = std::make_unique<NrfLabWindow>();
     else if (index == G_CC1101)   _window = std::make_unique<SubGhzLabWindow>();
+    else if (index == G_AP)       _window = std::make_unique<ApWindow>();
     else {
         const char* nm = (index >= 0 && index < G_COUNT) ? GRID[index].name : "Unknown";
         _window = std::make_unique<InfoWindow>(nm, "Coming soon");
