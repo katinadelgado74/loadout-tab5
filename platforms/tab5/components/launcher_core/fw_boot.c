@@ -75,13 +75,28 @@ esp_err_t fw_boot_file(const char *path, fw_boot_progress_cb_t progress, void *c
         return err;
     }
 
-    err = esp_ota_set_boot_partition(target);
+    // NO usamos esp_ota_set_boot_partition / otadata. En su lugar escribimos un
+    // flag de "arranque unico" que el bootloader custom lee: arranca ota_0 una
+    // sola vez y vuelve a 'factory' (LOADOUT) en el siguiente reset, pase lo que
+    // pase con el app lanzado (aunque se marque valido). Debe coincidir con
+    // bootloader_components/main/bootloader_start.c
+    const uint32_t LOADOUT_FLAG_MAGIC = 0x4C4F4144u;  // "LOAD"
+    const esp_partition_t *flagp =
+        esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "launchflag");
+    if (!flagp) {
+        ESP_LOGE(TAG, "no existe la particion launchflag");
+        return ESP_ERR_NOT_FOUND;
+    }
+    err = esp_partition_erase_range(flagp, 0, flagp->size);
+    if (err == ESP_OK) {
+        err = esp_partition_write(flagp, 0, &LOADOUT_FLAG_MAGIC, sizeof(LOADOUT_FLAG_MAGIC));
+    }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_ota_set_boot_partition: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "no se pudo escribir launchflag: %s", esp_err_to_name(err));
         return err;
     }
 
-    ESP_LOGI(TAG, "Firmware listo. Reiniciando en ota_0...");
+    ESP_LOGI(TAG, "Firmware listo (ota_0). Reiniciando una vez...");
     esp_restart();
     return ESP_OK;  // inalcanzable
 }

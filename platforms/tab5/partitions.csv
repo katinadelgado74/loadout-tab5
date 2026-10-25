@@ -1,14 +1,19 @@
 # Name,          Type, SubType, Offset,   Size, Flags
-# LOADOUT estilo Launcher: DOS ranuras de app (ota_0/ota_1) + rollback.
-#  - LOADOUT vive en una ranura (la que sea boot/valida).
-#  - Auto-update: se escribe en la ranura libre, set_boot, reinicia y se marca
-#    valida -> persiste (ping-pong A<->B).
-#  - Lanzar firmware externo: se escribe en la ranura libre, set_boot, reinicia
-#    SIN marcar valida -> en el siguiente reset el bootloader hace rollback a la
-#    ranura del launcher ("reset = volver al launcher" se mantiene).
+# LOADOUT "home base" layout with a custom bootloader (see
+# bootloader_components/). LOADOUT lives in the protected 'factory' partition
+# and ALWAYS boots, except for one launch:
+#  - Launch external firmware: LOADOUT writes it to 'ota_0', sets a one-shot
+#    flag in 'launchflag', and reboots.
+#  - The custom bootloader sees the flag, clears it, and boots ota_0 ONCE.
+#  - On the next reset the flag is gone, so the bootloader boots 'factory'
+#    (LOADOUT) again - no matter what the launched app did to otadata. This is
+#    what makes "reset = back to LOADOUT" reliable even for apps that mark
+#    themselves valid (Arduino firmwares, OrcSDR, etc.).
+# Trade-off: LOADOUT no longer self-OTA-updates (update it by flashing at 0x0).
 nvs,             data, nvs,     0x9000,   0x6000,
 otadata,         data, ota,     0xf000,   0x2000,
 phy_init,        data, phy,     0x11000,  0x1000,
-ota_0,           app,  ota_0,   0x20000,  0x6E0000,
-ota_1,           app,  ota_1,   ,         0x6E0000,
-storage,         data, spiffs,  ,         0x220000,
+launchflag,      data, 0x40,    0x12000,  0x1000,
+factory,         app,  factory, 0x20000,  0x500000,
+ota_0,           app,  ota_0,   0x520000, 0x700000,
+storage,         data, spiffs,  0xC20000, 0x3E0000,
