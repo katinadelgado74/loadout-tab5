@@ -34,8 +34,10 @@
 
 #define TAG        "hal_rf"
 #define RF_UART    UART_NUM_2
-#define RF_TX_PIN  54       // Tab5 Port A -> hub RX
-#define RF_RX_PIN  53       // Tab5 Port A <- hub TX
+// Link on the Tab5 M5-Bus (30-pin header on the back) so the hub can mount as a
+// module. Both pins are free M5-Bus GPIOs. Power the hub from the M5-Bus 5V/GND.
+#define RF_TX_PIN  47       // Tab5 M5-Bus G47 (TX) -> hub RX (WROOM GPIO16)
+#define RF_RX_PIN  48       // Tab5 M5-Bus G48 (RX) <- hub TX (WROOM GPIO17)
 #define RF_BUF     1024
 
 static uint32_t rf_now_ms() { return (uint32_t)(esp_timer_get_time() / 1000ULL); }

@@ -1814,7 +1814,7 @@ public:
         lv_obj_align(_status, LV_ALIGN_TOP_LEFT, 24, 50);
         lv_obj_set_style_text_font(_status, &lv_font_montserrat_20, 0);
         lv_obj_set_style_text_color(_status, lv_color_hex(0x7a8a82), 0);
-        lv_label_set_text(_status, "Link: waiting for hub on Port A (G53/G54) ...");
+        lv_label_set_text(_status, "Link: waiting for hub on M5-Bus (G47/G48) ...");
 
         _alarm = lv_label_create(root);
         lv_obj_align(_alarm, LV_ALIGN_TOP_RIGHT, -24, 50);
@@ -1918,7 +1918,7 @@ public:
                 lv_label_set_text(_status, s);
                 lv_obj_set_style_text_color(_status, lv_color_hex(0x38ef7d), 0);
             } else {
-                lv_label_set_text(_status, "Link: no hub  (Port A: G53<-hubTX, G54->hubRX, 5V, GND)");
+                lv_label_set_text(_status, "Link: no hub  (M5-Bus: G48<-hubTX, G47->hubRX, 5V, GND)");
                 lv_obj_set_style_text_color(_status, lv_color_hex(0xff8a80), 0);
             }
         }
