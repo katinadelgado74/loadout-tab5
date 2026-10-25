@@ -516,6 +516,12 @@ void wifi_init_softap()
         if (!tz.empty()) GetHAL()->setSettingStr("tz", tz);
     }
 
+    // --- Atajo SDR: nombre del .bin de OrcSDR en la SD (tile ORCSDR) ---
+    {
+        std::string s = conf_get(conf, "sdr_bin");
+        if (!s.empty()) GetHAL()->setSettingStr("sdr_bin", s);
+    }
+
     // --- Chatbot IA (endpoint OpenAI-compatible + key + modelo) ---
     {
         std::string u = conf_get(conf, "ai_url");
@@ -567,6 +573,8 @@ void wifi_init_softap()
                  "# OTA: URL del manifest latest.json de tu repo GitHub\r\n"
                  "# ota_url=https://github.com/USER/REPO/releases/latest/download/latest.json\r\n"
                  "ota_url=%s\r\n\r\n"
+                 "# Atajo SDR (tile ORCSDR del inicio): nombre del .bin de OrcSDR en la SD\r\n"
+                 "sdr_bin=orcsdr.bin\r\n\r\n"
                  "# Chatbot IA (endpoint OpenAI-compatible: DeepSeek/Qwen/OpenAI/Groq/Ollama)\r\n"
                  "# ai_url=https://api.deepseek.com/chat/completions\r\n"
                  "# ai_key=sk-...\r\n"

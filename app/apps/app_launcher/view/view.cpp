@@ -76,12 +76,12 @@ static void apply_theme(int idx)
 // Tiles visibles del grid principal (los primeros G_COUNT). Las herramientas
 // (IMU/GPIO/I2C/UART/Power) ya NO van en el grid: son IDs de routing que abre
 // la tarjeta "Tools" del sidebar.
-enum { G_LAUNCHER, G_OTA, G_FILES, G_CAMERA, G_MUSIC, G_ASK, G_COUNT,
+enum { G_LAUNCHER, G_SDR, G_FILES, G_CAMERA, G_MUSIC, G_ASK, G_COUNT,
        G_IMU, G_GPIO, G_I2C, G_UART, G_POWERINFO, G_RFLAB };
 struct TileDef { const char* icon; const char* name; };
 static const TileDef GRID[G_COUNT] = {
     {FA_LAUNCHER, "LAUNCHER"},
-    {FA_OTA,      "OTA UPDATE"},
+    {FA_OTA,      "ORCSDR"},
     {FA_FILES,    "FILE BROWSER"},
     {FA_CAMERA,   "CAMERA"},
     {FA_MUSIC,    "MUSIC"},
@@ -227,6 +227,81 @@ private:
     std::unique_ptr<Label> _msg, _flashMsg;
     std::vector<std::unique_ptr<Container>> _rows;
     std::vector<std::unique_ptr<Label>> _rows_lbl;
+    lv_obj_t* _bar = nullptr;
+};
+
+/* --------------------------- ventana ORCSDR (atajo) ----------------------- */
+// Lanza directamente el firmware OrcSDR (nombre en loadout.conf: sdr_bin) desde
+// la SD, usando el mismo flujo de arranque-unico del launcher: arranca OrcSDR y
+// un reset vuelve a LOADOUT. Reemplaza el antiguo boton de OTA.
+class SdrLaunchWindow : public ui::Window {
+public:
+    SdrLaunchWindow()
+    {
+        config.title = "ORCSDR"; config.bgColor = COL_CARD; config.borderColor = COL_BORDER;
+        config.titleColor = COL_TITLE; config.closeBtn = true;
+        config.kfClosed = {0, 0, 200, 140, 0}; config.kfOpened = {0, 0, 720, 420, 255};
+    }
+    void onOpen() override
+    {
+        lv_obj_t* root = _window->get();
+        _file = GetHAL()->getSettingStr("sdr_bin", "orcsdr.bin");
+
+        _info = std::make_unique<Label>(root);
+        _info->align(LV_ALIGN_TOP_MID, 0, 72); _info->setTextFont(&lv_font_montserrat_24);
+        _info->setTextColor(lv_color_hex(COL_LABEL));
+        lv_obj_set_width(_info->get(), 640);
+        lv_label_set_long_mode(_info->get(), LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_align(_info->get(), LV_TEXT_ALIGN_CENTER, 0);
+        _info->setText(std::string("Launch ") + _file + " from the SD card.\n"
+                       "The Tab5 boots OrcSDR; a reset brings you back to LOADOUT.");
+
+        _btn = std::make_unique<Container>(root);
+        _btn->setSize(380, 76); _btn->setRadius(12); _btn->setBgColor(lv_color_hex(0x16382b));
+        _btn->setBorderWidth(1); _btn->setBorderColor(lv_color_hex(COL_ACCENT));
+        _btn->align(LV_ALIGN_CENTER, 0, 28);
+        _btnLab = std::make_unique<Label>(_btn->get());
+        _btnLab->align(LV_ALIGN_CENTER, 0, 0); _btnLab->setTextFont(&lv_font_montserrat_28);
+        _btnLab->setTextColor(lv_color_hex(COL_ACCENT));
+        _btnLab->setText(LV_SYMBOL_PLAY "  LAUNCH ORCSDR");
+        _btn->onClick().connect([this] {
+            audio::play_next_tone_progression();
+            GetHAL()->bootFirmwareAsync(std::string("/sd/") + _file);
+        });
+    }
+    void onUpdate() override
+    {
+        if (_state != Opened) return;
+        int fp = GetHAL()->flashProgress();
+        if (fp >= 0 || fp == -2) {
+            if (!_bar) {
+                _bar = lv_bar_create(_window->get());
+                lv_obj_set_size(_bar, 560, 26); lv_obj_align(_bar, LV_ALIGN_CENTER, 0, 118);
+                lv_obj_set_style_bg_color(_bar, lv_color_hex(0x0a120f), LV_PART_MAIN);
+                lv_obj_set_style_bg_color(_bar, lv_color_hex(COL_ACCENT), LV_PART_INDICATOR);
+                _flashMsg = std::make_unique<Label>(_window->get());
+                _flashMsg->align(LV_ALIGN_CENTER, 0, 86); _flashMsg->setTextFont(&lv_font_montserrat_24);
+                _flashMsg->setTextColor(lv_color_hex(COL_ACCENT));
+            }
+            if (fp == -2) {
+                lv_bar_set_value(_bar, 0, LV_ANIM_OFF);
+                _flashMsg->setText(LV_SYMBOL_WARNING "  Not found - check sdr_bin in loadout.conf");
+            } else {
+                lv_bar_set_value(_bar, fp, LV_ANIM_OFF);
+                char b[52]; snprintf(b, sizeof(b), "Loading OrcSDR... %d%%  (do not power off)", fp);
+                _flashMsg->setText(b);
+            }
+        }
+    }
+    void onClose() override
+    {
+        _btnLab.reset(); _btn.reset(); _info.reset(); _flashMsg.reset();
+        if (_bar) { lv_obj_del(_bar); _bar = nullptr; }
+    }
+private:
+    std::string _file;
+    std::unique_ptr<Label> _info, _btnLab, _flashMsg;
+    std::unique_ptr<Container> _btn;
     lv_obj_t* _bar = nullptr;
 };
 
@@ -2507,7 +2582,7 @@ void LauncherView::open_tile(int index)
     else if (index == G_GPIO)     _window = std::make_unique<GpioWindow>();
     else if (index == G_MUSIC)    _window = std::make_unique<MusicWindow>();
     else if (index == G_ASK)      _window = std::make_unique<ChatWindow>();
-    else if (index == G_OTA)      _window = std::make_unique<OtaWindow>();
+    else if (index == G_SDR)      _window = std::make_unique<SdrLaunchWindow>();
     else if (index == G_CAMERA)   _window = std::make_unique<CameraWindow>();
     else if (index == G_UART)     _window = std::make_unique<UartWindow>();
     else if (index == A_BRIGHT)   _window = std::make_unique<ControlWindow>(true);
