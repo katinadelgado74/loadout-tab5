@@ -44,6 +44,12 @@
 
 static bool s_wifi_ap_netif_started = false;
 
+// LOADOUT settings access point lifecycle (toggleable at runtime).
+static httpd_handle_t s_server        = nullptr;
+static volatile bool  s_ap_on         = false;
+static wifi_config_t  s_ap_config     = {};     // saved so the AP can be restarted
+static bool           s_use_sta_mode  = false;
+
 static void wifi_remote_ap_start_handler(void* arg, esp_event_base_t base, int32_t event_id, void* data)
 {
     auto* netif = static_cast<esp_netif_t*>(arg);
@@ -602,6 +608,8 @@ void wifi_init_softap()
     ap_config.ap.ssid_len       = std::strlen(WIFI_SSID);
     ap_config.ap.max_connection = MAX_STA_CONN;
     ap_config.ap.authmode       = WIFI_AUTH_WPA2_PSK;
+    s_ap_config    = ap_config;   // saved so apSet(true) can restart the AP later
+    s_use_sta_mode = useSta;
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(useSta ? WIFI_MODE_APSTA : WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
@@ -630,16 +638,45 @@ void wifi_init_softap()
     }
 }
 
+// Start the settings AP + dashboard (idempotent). Reapplies the saved config.
+static void ap_start()
+{
+    esp_wifi_set_mode(s_use_sta_mode ? WIFI_MODE_APSTA : WIFI_MODE_AP);
+    esp_wifi_set_config(WIFI_IF_AP, &s_ap_config);
+    esp_wifi_start();                       // no-op if already running
+    if (!s_server) s_server = start_webserver();
+    s_ap_on = true;
+}
+// Stop broadcasting the settings AP and shut the dashboard down.
+static void ap_stop()
+{
+    if (s_server) { httpd_stop(s_server); s_server = nullptr; }
+    esp_wifi_set_mode(s_use_sta_mode ? WIFI_MODE_STA : WIFI_MODE_NULL);
+    s_ap_on = false;
+}
+
 static void wifi_ap_test_task(void* param)
 {
-    wifi_init_softap();
-    start_webserver();
-
+    wifi_init_softap();                     // one-time driver + AP bring-up
+    if (GetHAL()->getSettingInt("ap_on", 1) != 0) {
+        s_server = start_webserver();
+        s_ap_on  = true;
+    } else {
+        ap_stop();                          // user previously turned the AP off
+    }
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
     vTaskDelete(NULL);
 }
+
+void HalEsp32::apSet(bool on)
+{
+    if (on == s_ap_on) { setSettingInt("ap_on", on ? 1 : 0); return; }
+    if (on) ap_start(); else ap_stop();
+    setSettingInt("ap_on", on ? 1 : 0);
+}
+bool HalEsp32::apOn() { return s_ap_on; }
 
 /* ------------------------------- OTA update ------------------------------- */
 // Estados: 0 idle, 1 checking, 2 checked(hay info), 3 updating, 4 error

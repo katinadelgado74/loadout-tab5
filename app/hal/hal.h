@@ -367,6 +367,11 @@ public:
     {
     }
 
+    // LOADOUT settings access point (SoftAP + web dashboard). Toggle so the Tab5
+    // isn't always broadcasting its own Wi-Fi. Independent of the RF hub relay.
+    virtual void apSet(bool /*on*/) {}
+    virtual bool apOn() { return true; }
+
     /* --------------------------------- SD Card -------------------------------- */
     struct FileEntry_t {
         std::string name;

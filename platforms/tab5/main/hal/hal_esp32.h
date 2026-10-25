@@ -97,6 +97,8 @@ public:
     ChatUsage_t chatUsage() override;
     void chatResetBudget() override;
     void chatNewConversation() override;
+    void apSet(bool on) override;
+    bool apOn() override;
 
     bool isSdCardMounted() override;
     std::vector<FileEntry_t> scanSdCard(const std::string& dirPath) override;
