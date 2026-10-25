@@ -1913,7 +1913,7 @@ public:
             _swLab[i]->align(LV_ALIGN_CENTER, 0, 0);
             _swLab[i]->setTextFont(&lv_font_montserrat_20);
             std::string c = cmd[i];
-            _sw[i]->onClick().connect([this, c] {
+            _sw[i]->onClick().connect([this, c, i] {
                 auto& d = GetHAL()->rfHub;
                 bool on;
                 { std::lock_guard<std::mutex> lk(d.mutex);
@@ -1933,6 +1933,10 @@ public:
                     if (!on) { creds(); GetHAL()->rfHubSend("!sta=1"); GetHAL()->rfHubSend("!api=1"); }
                     else { GetHAL()->rfHubSend("!api=0"); GetHAL()->rfHubSend("!sta=0"); }
                 }
+                // Optimistic: show the intended state immediately; the hub echo
+                // (and, for STATION, the association) catch up within a few seconds.
+                _pendVal[i] = !on; _pendUntil[i] = lv_tick_get() + 8000;
+                refresh_switches();
             });
         }
         refresh_switches();
@@ -2049,14 +2053,20 @@ private:
         auto& d = GetHAL()->rfHub;
         bool on[3] = { (bool)d.enWifi, strcmp(d.staState, "off") != 0, (bool)d.enApi };
         static const char* nm[3] = {"MONITOR", "STATION", "AI RELAY"};
+        uint32_t now = lv_tick_get();
         for (int i = 0; i < 3; i++) {
             if (!_sw[i]) continue;
-            uint32_t col = on[i] ? COL_ACCENT : 0x4a5a52;
+            bool pending = _pendUntil[i] && now < _pendUntil[i] && on[i] != _pendVal[i];
+            if (_pendUntil[i] && (on[i] == _pendVal[i] || now >= _pendUntil[i])) _pendUntil[i] = 0;
+            bool show = pending ? _pendVal[i] : on[i];
+            uint32_t col = pending ? 0xffd166 : (show ? COL_ACCENT : 0x4a5a52);  // amber while awaiting hub
             _sw[i]->setBorderColor(lv_color_hex(col));
             _swLab[i]->setTextColor(lv_color_hex(col));
-            _swLab[i]->setText(std::string(nm[i]) + (on[i] ? ": ON" : ": OFF"));
+            _swLab[i]->setText(std::string(nm[i]) + (pending ? "..." : (show ? ": ON" : ": OFF")));
         }
     }
+    uint32_t _pendUntil[3] = {0, 0, 0};
+    bool     _pendVal[3]   = {false, false, false};
     std::unique_ptr<Container> _sw[3];
     std::unique_ptr<Label> _swLab[3];
     lv_obj_t* _status = nullptr; lv_obj_t* _alarm = nullptr;
@@ -2356,7 +2366,7 @@ public:
         _swLab = std::make_unique<Label>(_sw->get());
         _swLab->align(LV_ALIGN_CENTER, 0, 0);
         _swLab->setTextFont(&lv_font_montserrat_24);
-        _sw->onClick().connect([this] { GetHAL()->apSet(!GetHAL()->apOn()); });
+        _sw->onClick().connect([this] { GetHAL()->apSet(!GetHAL()->apOn()); refresh(); });
 
         _info = lv_label_create(root);
         lv_label_set_long_mode(_info, LV_LABEL_LONG_WRAP);
