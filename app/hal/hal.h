@@ -526,6 +526,13 @@ public:
         char     staIp[16]    = "0.0.0.0";
         int      staRssi      = 0;
         char     staSsid[33]  = "";
+        // AI relay: when enApi is set and station is connected, the Tab5 routes
+        // its Claude chat through the hub's Wi-Fi. The chat task fills the
+        // request via rfHubSend(); the UART reader reassembles the response here.
+        int          enApi      = 0;    // hub relay enabled (from STATUS api=)
+        volatile int relayState = 0;    // 0 idle, 1 inflight, 2 done, 3 error
+        std::string  relayResp;         // reassembled response JSON (or error text)
+        int          relayStatus = 0;   // HTTP status reported by the hub
         // AP table for the Wi-Fi analyzer (built from beacon/probe-resp lines)
         struct ApInfo_t { char bssid[18]; char ssid[33]; int ch; int rssi; uint32_t lastMs; };
         ApInfo_t apList[40];

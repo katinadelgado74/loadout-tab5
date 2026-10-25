@@ -24,6 +24,7 @@
 #include <esp_http_client.h>
 #include <esp_https_ota.h>
 #include <esp_crt_bundle.h>
+#include "mbedtls/base64.h"
 #include <esp_netif_sntp.h>
 #include <esp_sntp.h>
 #include <time.h>
@@ -872,6 +873,52 @@ static int json_get_int(const std::string& j, const char* key)
     return (int)v;
 }
 
+// --- AI relay over the RF hub -------------------------------------------
+// When the hub is in station mode and its relay is enabled, the Tab5 sends the
+// request over UART and the hub performs the HTTPS POST on its own Wi-Fi. All
+// request/response bodies are base64-framed so '|' and newlines stay clear of
+// the line protocol.
+static std::string b64enc(const std::string& in)
+{
+    if (in.empty()) return "";
+    size_t cap = 4 * ((in.size() + 2) / 3) + 1, olen = 0;
+    std::string out; out.resize(cap);
+    if (mbedtls_base64_encode((unsigned char*)out.data(), cap, &olen,
+                              (const unsigned char*)in.data(), in.size()) != 0)
+        return "";
+    out.resize(olen);
+    return out;
+}
+
+// Returns true if the hub relay is enabled and its station link is up.
+static bool relay_available()
+{
+    auto& d = GetHAL()->rfHub;
+    std::lock_guard<std::mutex> lk(d.mutex);
+    return d.enApi && d.linked && strcmp(d.staState, "connected") == 0;
+}
+
+// Perform the POST through the hub; fills resp/status. false on error/timeout.
+static bool relay_post(const std::string& url, const std::string& key, const std::string& ws,
+                       const std::string& body, std::string& resp, int& status)
+{
+    auto& d = GetHAL()->rfHub;
+    GetHAL()->rfHubSend("AKEY|" + b64enc(key));
+    GetHAL()->rfHubSend("AWS|"  + b64enc(ws));
+    GetHAL()->rfHubSend("AURL|" + b64enc(url));
+    { std::lock_guard<std::mutex> lk(d.mutex); d.relayState = 1; d.relayResp.clear(); d.relayStatus = 0; }
+    GetHAL()->rfHubSend("AREQ|" + b64enc(body));
+    for (int i = 0; i < 1200; i++) {                    // up to 60 s
+        vTaskDelay(50 / portTICK_PERIOD_MS);
+        int st; { std::lock_guard<std::mutex> lk(d.mutex); st = d.relayState; }
+        if (st == 2) { std::lock_guard<std::mutex> lk(d.mutex); resp = d.relayResp; status = d.relayStatus; d.relayState = 0; return true; }
+        if (st == 3) { std::lock_guard<std::mutex> lk(d.mutex); resp = d.relayResp; status = d.relayStatus; d.relayState = 0; return false; }
+    }
+    { std::lock_guard<std::mutex> lk(d.mutex); d.relayState = 0; }
+    resp = "relay timeout"; status = 0;
+    return false;
+}
+
 static void chat_task(void*)
 {
     s_chat_state = 1;
@@ -883,8 +930,9 @@ static void chat_task(void*)
     if (url.empty() || key.empty()) {
         s_chat_reply = "Set ai_url / ai_key in /sd/loadout.conf"; s_chat_state = 3; vTaskDelete(NULL); return;
     }
-    if (!s_sta_connected) {
-        s_chat_reply = "Connect home WiFi first (Settings)"; s_chat_state = 3; vTaskDelete(NULL); return;
+    bool useRelay = relay_available();
+    if (!useRelay && !s_sta_connected) {
+        s_chat_reply = "Connect home WiFi, or enable AI RELAY in WiFi Analyzer"; s_chat_state = 3; vTaskDelete(NULL); return;
     }
     // Presupuesto agotado -> no se envia nada (no gasta tokens).
     int budget = GetHAL()->getSettingInt("ai_budget", 0);
@@ -907,27 +955,36 @@ static void chat_task(void*)
     }
     std::string body = "{\"model\":\"" + model + "\",\"max_tokens\":" + std::to_string(maxTok) +
                        ",\"messages\":[" + msgs + "],\"stream\":false}";
-    std::string resp;
-    esp_http_client_config_t cfg = {};
-    cfg.url               = url.c_str();
-    cfg.crt_bundle_attach = esp_crt_bundle_attach;
-    cfg.timeout_ms        = 30000;
-    cfg.event_handler     = http_evt;
-    cfg.user_data         = &resp;
-    cfg.method            = HTTP_METHOD_POST;
-    esp_http_client_handle_t c = esp_http_client_init(&cfg);
-    std::string auth = "Bearer " + key;
-    esp_http_client_set_header(c, "Authorization", auth.c_str());
-    esp_http_client_set_header(c, "Content-Type", "application/json");
     std::string ws = GetHAL()->getSettingStr("ai_ws", "");
-    if (!ws.empty()) esp_http_client_set_header(c, "anthropic-workspace-id", ws.c_str());
-    esp_http_client_set_post_field(c, body.c_str(), body.size());
-    esp_err_t e = esp_http_client_perform(c);
-    int status  = esp_http_client_get_status_code(c);
-    esp_http_client_cleanup(c);
-    if (e != ESP_OK) {
-        s_chat_reply = std::string("Network error: ") + esp_err_to_name(e); s_chat_state = 3;
-        vTaskDelete(NULL); return;
+    std::string resp;
+    int status = 0;
+    if (useRelay) {
+        // Route through the hub's Wi-Fi over UART instead of the local stack.
+        if (!relay_post(url, key, ws, body, resp, status)) {
+            s_chat_reply = std::string("Relay: ") + (resp.empty() ? "no response from hub" : resp);
+            s_chat_state = 3; vTaskDelete(NULL); return;
+        }
+    } else {
+        esp_http_client_config_t cfg = {};
+        cfg.url               = url.c_str();
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+        cfg.timeout_ms        = 30000;
+        cfg.event_handler     = http_evt;
+        cfg.user_data         = &resp;
+        cfg.method            = HTTP_METHOD_POST;
+        esp_http_client_handle_t c = esp_http_client_init(&cfg);
+        std::string auth = "Bearer " + key;
+        esp_http_client_set_header(c, "Authorization", auth.c_str());
+        esp_http_client_set_header(c, "Content-Type", "application/json");
+        if (!ws.empty()) esp_http_client_set_header(c, "anthropic-workspace-id", ws.c_str());
+        esp_http_client_set_post_field(c, body.c_str(), body.size());
+        esp_err_t e = esp_http_client_perform(c);
+        status = esp_http_client_get_status_code(c);
+        esp_http_client_cleanup(c);
+        if (e != ESP_OK) {
+            s_chat_reply = std::string("Network error: ") + esp_err_to_name(e); s_chat_state = 3;
+            vTaskDelete(NULL); return;
+        }
     }
     // Consumo real que reporta la API ("usage"): se suma aunque la respuesta venga vacia.
     int pt = json_get_int(resp, "prompt_tokens");

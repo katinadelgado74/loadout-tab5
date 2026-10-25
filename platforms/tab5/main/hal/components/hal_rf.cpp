@@ -31,6 +31,20 @@
 #include <vector>
 #include <cstdlib>
 #include <cstring>
+#include "mbedtls/base64.h"
+
+// Decode a base64 chunk (no embedded whitespace) into raw bytes.
+static std::string rf_b64dec(const std::string& in)
+{
+    if (in.empty()) return "";
+    size_t cap = (in.size() / 4 + 1) * 3 + 4, olen = 0;
+    std::string out; out.resize(cap);
+    if (mbedtls_base64_decode((unsigned char*)out.data(), cap, &olen,
+                              (const unsigned char*)in.data(), in.size()) != 0)
+        return "";
+    out.resize(olen);
+    return out;
+}
 
 #define TAG        "hal_rf"
 #define RF_UART    UART_NUM_2
@@ -94,6 +108,7 @@ static void rf_parse(const std::string& ln)
             d.enWifi = kv("wifi", d.enWifi); d.enS24 = kv("s24", d.enS24);
             d.enSub  = kv("sub", d.enSub);   d.enSubrx = kv("subrx", d.enSubrx);
             d.nrfFound = kv("nrf", d.nrfFound); d.ccFound = kv("cc", d.ccFound);
+            d.enApi  = kv("api", d.enApi);
         }
         rf_push_log(d, ln.substr(0, 72));
         return;
@@ -123,6 +138,10 @@ static void rf_parse(const std::string& ln)
         if (f.size() >= 5) { strncpy(d.staSsid, f[4].c_str(), sizeof(d.staSsid) - 1); d.staSsid[sizeof(d.staSsid) - 1] = 0; }
         return;
     }
+    // AI relay response: base64 body chunks, then AEND|<status> or AERR|<msg>.
+    if (f[0] == "ARSP" && f.size() >= 2) { if (d.relayState == 1) d.relayResp += rf_b64dec(f[1]); return; }
+    if (f[0] == "AEND" && f.size() >= 2) { d.relayStatus = atoi(f[1].c_str()); d.relayState = 2; return; }
+    if (f[0] == "AERR") { d.relayResp = (f.size() >= 2 ? f[1] : "relay error"); d.relayStatus = 0; d.relayState = 3; return; }
     if (tag == 'B' && f.size() >= 5) {
         rf_upsert_ap(d, f[3], f[4], atoi(f[1].c_str()), atoi(f[2].c_str()));
         rf_push_log(d, "AP   ch" + f[1] + " " + f[2] + "dBm " + f[4] + " [" + f[3] + "]");
@@ -162,7 +181,7 @@ static void rf_task(void*)
             for (int i = 0; i < len; i++) {
                 char c = (char)buf[i];
                 if (c == '\n') { if (!acc.empty()) { rf_parse(acc); acc.clear(); } }
-                else if (c != '\r') { acc += c; if (acc.size() > 300) acc.clear(); }
+                else if (c != '\r') { acc += c; if (acc.size() > 1024) acc.clear(); }
             }
         }
         {

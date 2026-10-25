@@ -1902,8 +1902,9 @@ public:
         lv_obj_add_flag(_alarm, LV_OBJ_FLAG_HIDDEN);
 
         // MONITOR and STATION are mutually exclusive on the hub (single radio).
-        static const char* cmd[2] = {"wifi", "sta"};
-        for (int i = 0; i < 2; i++) {
+        // AI RELAY brings station up and turns the hub's chat relay on in one tap.
+        static const char* cmd[3] = {"wifi", "sta", "api"};
+        for (int i = 0; i < 3; i++) {
             _sw[i] = std::make_unique<Container>(root);
             _sw[i]->setSize(190, 50); _sw[i]->setRadius(8);
             _sw[i]->setBgColor(lv_color_hex(0x12241c)); _sw[i]->setBorderWidth(2);
@@ -1916,15 +1917,21 @@ public:
                 auto& d = GetHAL()->rfHub;
                 bool on;
                 { std::lock_guard<std::mutex> lk(d.mutex);
-                  on = (c == "wifi") ? (bool)d.enWifi : (strcmp(d.staState, "off") != 0); }
-                if (c == "sta") {
-                    if (!on) {
-                        GetHAL()->rfHubSend(std::string("!ssid=") + GetHAL()->getSettingStr("sta_ssid", ""));
-                        GetHAL()->rfHubSend(std::string("!pw=")   + GetHAL()->getSettingStr("sta_pass", ""));
-                        GetHAL()->rfHubSend("!sta=1");
-                    } else GetHAL()->rfHubSend("!sta=0");
-                } else {
+                  if (c == "wifi")     on = d.enWifi;
+                  else if (c == "api") on = d.enApi;
+                  else                 on = (strcmp(d.staState, "off") != 0); }
+                auto creds = [] {
+                    GetHAL()->rfHubSend(std::string("!ssid=") + GetHAL()->getSettingStr("sta_ssid", ""));
+                    GetHAL()->rfHubSend(std::string("!pw=")   + GetHAL()->getSettingStr("sta_pass", ""));
+                };
+                if (c == "wifi") {
                     GetHAL()->rfHubSend(std::string("!wifi=") + (on ? "0" : "1"));
+                } else if (c == "sta") {
+                    if (!on) { creds(); GetHAL()->rfHubSend("!sta=1"); }
+                    else GetHAL()->rfHubSend("!sta=0");
+                } else { // api: bundle station connect + relay enable
+                    if (!on) { creds(); GetHAL()->rfHubSend("!sta=1"); GetHAL()->rfHubSend("!api=1"); }
+                    else { GetHAL()->rfHubSend("!api=0"); GetHAL()->rfHubSend("!sta=0"); }
                 }
             });
         }
@@ -2031,7 +2038,7 @@ public:
     }
     void onClose() override
     {
-        for (int i = 0; i < 2; i++) { _swLab[i].reset(); _sw[i].reset(); }
+        for (int i = 0; i < 3; i++) { _swLab[i].reset(); _sw[i].reset(); }
         auto del = [](lv_obj_t*& o){ if (o) { lv_obj_del(o); o = nullptr; } };
         del(_status); del(_alarm); del(_chanLbl); del(_chart);
         del(_apLbl); del(_list); del(_logLbl); del(_log);
@@ -2040,9 +2047,9 @@ private:
     void refresh_switches()
     {
         auto& d = GetHAL()->rfHub;
-        bool on[2] = { (bool)d.enWifi, strcmp(d.staState, "off") != 0 };
-        static const char* nm[2] = {"MONITOR", "STATION"};
-        for (int i = 0; i < 2; i++) {
+        bool on[3] = { (bool)d.enWifi, strcmp(d.staState, "off") != 0, (bool)d.enApi };
+        static const char* nm[3] = {"MONITOR", "STATION", "AI RELAY"};
+        for (int i = 0; i < 3; i++) {
             if (!_sw[i]) continue;
             uint32_t col = on[i] ? COL_ACCENT : 0x4a5a52;
             _sw[i]->setBorderColor(lv_color_hex(col));
@@ -2050,8 +2057,8 @@ private:
             _swLab[i]->setText(std::string(nm[i]) + (on[i] ? ": ON" : ": OFF"));
         }
     }
-    std::unique_ptr<Container> _sw[2];
-    std::unique_ptr<Label> _swLab[2];
+    std::unique_ptr<Container> _sw[3];
+    std::unique_ptr<Label> _swLab[3];
     lv_obj_t* _status = nullptr; lv_obj_t* _alarm = nullptr;
     lv_obj_t* _chanLbl = nullptr; lv_obj_t* _chart = nullptr; lv_chart_series_t* _ser = nullptr;
     lv_obj_t* _apLbl = nullptr; lv_obj_t* _list = nullptr;
