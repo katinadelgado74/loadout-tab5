@@ -1417,8 +1417,10 @@ public:
         _stat = std::make_unique<Label>(root);
         _stat->align(LV_ALIGN_TOP_LEFT, 30, 62); _stat->setTextFont(&lv_font_montserrat_20);
         _stat->setTextColor(lv_color_hex(COL_ACCENT)); _stat->setText("Tokens: -");
-        lv_obj_set_width(_stat->get(), 610);
+        lv_obj_set_width(_stat->get(), 424);
         lv_label_set_long_mode(_stat->get(), LV_LABEL_LONG_DOT);  // no pisar los botones
+        _apiBtn = make_small_btn(root, "API: OFF", -442, _apiLab);
+        _apiBtn->onClick().connect([this] { _pendingApi = true; });
         _newBtn = make_small_btn(root, LV_SYMBOL_REFRESH " NEW CHAT", -264, _newLab);
         _newBtn->onClick().connect([this] { _pendingNew = true; });
         _rstBtn = make_small_btn(root, LV_SYMBOL_TRASH " RESET", -86, _rstLab);
@@ -1463,6 +1465,23 @@ public:
     void onUpdate() override
     {
         if (_state != Opened) return;
+        updateApiBtn();
+        if (_pendingApi) {
+            _pendingApi = false;
+            auto& d = GetHAL()->rfHub;
+            bool on; { std::lock_guard<std::mutex> lk(d.mutex); on = d.enApi; }
+            auto creds = [] {
+                GetHAL()->rfHubSend(std::string("!ssid=") + GetHAL()->getSettingStr("sta_ssid", ""));
+                GetHAL()->rfHubSend(std::string("!pw=")   + GetHAL()->getSettingStr("sta_pass", ""));
+            };
+            if (!on) {
+                creds(); GetHAL()->rfHubSend("!sta=1"); GetHAL()->rfHubSend("!api=1");
+                addBubble("AI relay ON - connecting the hub to Wi-Fi. Give it a few seconds, then ask.", false);
+            } else {
+                GetHAL()->rfHubSend("!api=0"); GetHAL()->rfHubSend("!sta=0");
+                addBubble("AI relay OFF - hub disconnected from Wi-Fi.", false);
+            }
+        }
         if (_pendingSend) {
             _pendingSend = false;
             std::string q = lv_textarea_get_text(_ta);
@@ -1524,6 +1543,7 @@ public:
         if (_grp) { lv_group_del(_grp); _grp = nullptr; }
         _bubbles.clear(); _bubbleLabels.clear(); _conv.reset(); _send.reset(); _sendLab.reset();
         _stat.reset(); _newLab.reset(); _rstLab.reset(); _newBtn.reset(); _rstBtn.reset();
+        _apiLab.reset(); _apiBtn.reset();
         if (_ta) { lv_obj_del(_ta); _ta = nullptr; }
     }
 private:
@@ -1535,6 +1555,21 @@ private:
         std::string s = std::to_string(v < 0 ? 0 : v);
         for (int i = (int)s.size() - 3; i > 0; i -= 3) s.insert((size_t)i, ",");
         return s;
+    }
+
+    void updateApiBtn()
+    {
+        if (!_apiBtn || !_apiLab) return;
+        auto& d = GetHAL()->rfHub;
+        bool en; bool conn;
+        { std::lock_guard<std::mutex> lk(d.mutex); en = d.enApi; conn = strcmp(d.staState, "connected") == 0; }
+        uint32_t col; std::string t;
+        if (en && conn)      { col = COL_ACCENT; t = "API: ON"; }
+        else if (en)         { col = 0xffd166;   t = "API: ..."; }   // relay up, still connecting
+        else                 { col = 0x6a7a72;   t = "API: OFF"; }
+        _apiLab->setTextColor(lv_color_hex(col));
+        _apiLab->setText(t);
+        _apiBtn->setBorderColor(lv_color_hex(en ? col : 0x2a3a32));
     }
 
     std::unique_ptr<Container> make_small_btn(lv_obj_t* p, const char* txt, int dx, std::unique_ptr<Label>& lab)
@@ -1629,9 +1664,9 @@ private:
     lv_obj_t* _pendBubble = nullptr;
     lv_group_t* _grp = nullptr;
     bool _busy = false, _pendingSend = false;
-    std::unique_ptr<Label> _stat, _newLab, _rstLab;
-    std::unique_ptr<Container> _newBtn, _rstBtn;
-    bool _pendingNew = false, _pendingRst = false, _convWarned = false;
+    std::unique_ptr<Label> _stat, _newLab, _rstLab, _apiLab;
+    std::unique_ptr<Container> _newBtn, _rstBtn, _apiBtn;
+    bool _pendingNew = false, _pendingRst = false, _pendingApi = false, _convWarned = false;
     int _budgetWarnLvl = 0;
     uint32_t _rstArmedAt = 0;
 };
