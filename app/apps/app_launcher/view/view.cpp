@@ -76,8 +76,9 @@ static void apply_theme(int idx)
 // Tiles visibles del grid principal (los primeros G_COUNT). Las herramientas
 // (IMU/GPIO/I2C/UART/Power) ya NO van en el grid: son IDs de routing que abre
 // la tarjeta "Tools" del sidebar.
-enum { G_LAUNCHER, G_SDR, G_FILES, G_CAMERA, G_MUSIC, G_ASK, G_COUNT,
-       G_IMU, G_GPIO, G_I2C, G_UART, G_POWERINFO, G_WIFIAN, G_NRF, G_CC1101, G_AP };
+enum { G_LAUNCHER, G_SDR, G_FILES, G_CAMERA, G_MUSIC, G_ASK,
+       G_WIFIAN, G_NRF, G_CC1101, G_COUNT,
+       G_IMU, G_GPIO, G_I2C, G_UART, G_POWERINFO, G_AP };
 struct TileDef { const char* icon; const char* name; };
 static const TileDef GRID[G_COUNT] = {
     {FA_LAUNCHER, "LAUNCHER"},
@@ -86,6 +87,9 @@ static const TileDef GRID[G_COUNT] = {
     {FA_CAMERA,   "CAMERA"},
     {FA_MUSIC,    "MUSIC"},
     {FA_ASK,      "ASK AI"},
+    {FA_UART,     "WIFI ANALYZER"},
+    {FA_UART,     "NRF24 2.4G"},
+    {FA_UART,     "CC1101 SUB"},
 };
 
 /* acciones (indices logicos para open_tile) */
@@ -1869,6 +1873,27 @@ private:
     std::unique_ptr<Label> _v, _a, _b;
 };
 
+// Small tap control (button / stepper key) for the analyzer panels. Stored in
+// the caller's vectors so cleanup is a single clear(). Returns the Label so the
+// caller can update its text/colour later.
+template <class F>
+static Label* mk_ctl(std::vector<std::unique_ptr<Container>>& cv,
+                     std::vector<std::unique_ptr<Label>>& labv,
+                     lv_obj_t* root, const char* txt, int x, int y, int w, int h, F cb)
+{
+    auto c = std::make_unique<Container>(root);
+    c->setSize(w, h); c->setRadius(8); c->setBgColor(lv_color_hex(0x12241c));
+    c->setBorderWidth(2); c->setBorderColor(lv_color_hex(0x4a5a52));
+    c->align(LV_ALIGN_TOP_LEFT, x, y);
+    auto l = std::make_unique<Label>(c->get());
+    l->align(LV_ALIGN_CENTER, 0, 0); l->setTextFont(&lv_font_montserrat_16);
+    l->setTextColor(lv_color_hex(COL_LABEL)); l->setText(txt);
+    c->onClick().connect(cb);
+    Label* lp = l.get();
+    cv.push_back(std::move(c)); labv.push_back(std::move(l));
+    return lp;
+}
+
 /* --------------------------- ventana WiFi Analyzer ------------------------ */
 // Self-contained Wi-Fi panel. MONITOR / STATION switches live here, so they
 // keep working when you leave and re-enter the screen: switch state is read
@@ -1941,6 +1966,19 @@ public:
         }
         refresh_switches();
 
+        // Controls: channel lock (0 = hop), clear list, refresh rate.
+        _wch = GetHAL()->getSettingInt("wifi_wch", 0);
+        GetHAL()->rfHubSend(std::string("!wch=") + std::to_string(_wch));
+        mk_ctl(_cv, _lv, root, LV_SYMBOL_MINUS, 630, 86, 44, 50, [this] { set_wch(_wch - 1); });
+        _wchLab = mk_ctl(_cv, _lv, root, "CH: HOP", 678, 86, 104, 50, [] {});
+        mk_ctl(_cv, _lv, root, LV_SYMBOL_PLUS, 786, 86, 44, 50, [this] { set_wch(_wch + 1); });
+        mk_ctl(_cv, _lv, root, "CLEAR", 838, 86, 120, 50, [this] {
+            auto& d = GetHAL()->rfHub; std::lock_guard<std::mutex> lk(d.mutex);
+            d.apCount = 0; d.apSeq++; });
+        _rateBtn = mk_ctl(_cv, _lv, root, "RATE: FAST", 962, 86, 150, 50,
+                          [this] { _rateIdx = (_rateIdx + 1) % 3; refresh_ctls(); });
+        refresh_ctls();
+
         _chanLbl = lv_label_create(root);
         lv_obj_align(_chanLbl, LV_ALIGN_TOP_LEFT, 24, 150);
         lv_obj_set_style_text_font(_chanLbl, &lv_font_montserrat_16, 0);
@@ -2009,8 +2047,8 @@ public:
             if (d.alarm) lv_obj_clear_flag(_alarm, LV_OBJ_FLAG_HIDDEN);
             else         lv_obj_add_flag(_alarm, LV_OBJ_FLAG_HIDDEN);
         }
-        if (_chart && d.apSeq != _seenAp) {
-            _seenAp = d.apSeq;
+        if (_chart && d.apSeq != _seenAp && (lv_tick_get() - _lastDraw) >= _rate_ms()) {
+            _seenAp = d.apSeq; _lastDraw = lv_tick_get();
             int cnt[15] = {0}; int mx = 4;
             for (int i = 0; i < d.apCount; i++) {
                 int ch = d.apList[i].ch;
@@ -2043,11 +2081,22 @@ public:
     void onClose() override
     {
         for (int i = 0; i < 3; i++) { _swLab[i].reset(); _sw[i].reset(); }
+        _cv.clear(); _lv.clear(); _wchLab = _rateBtn = nullptr;
         auto del = [](lv_obj_t*& o){ if (o) { lv_obj_del(o); o = nullptr; } };
         del(_status); del(_alarm); del(_chanLbl); del(_chart);
         del(_apLbl); del(_list); del(_logLbl); del(_log);
     }
 private:
+    uint32_t _rate_ms() { return _rateIdx == 0 ? 0 : (_rateIdx == 1 ? 500 : 1200); }
+    void set_wch(int c) { if (c < 0) c = 0; if (c > 14) c = 14; _wch = c;
+        GetHAL()->setSettingInt("wifi_wch", c);
+        GetHAL()->rfHubSend(std::string("!wch=") + std::to_string(c)); refresh_ctls(); }
+    void refresh_ctls()
+    {
+        if (_wchLab) _wchLab->setText(_wch == 0 ? "CH: HOP" : ("CH: " + std::to_string(_wch)));
+        if (_rateBtn) { static const char* rn[3] = {"FAST", "MED", "SLOW"};
+                        _rateBtn->setText(std::string("RATE: ") + rn[_rateIdx]); }
+    }
     void refresh_switches()
     {
         auto& d = GetHAL()->rfHub;
@@ -2069,6 +2118,10 @@ private:
     bool     _pendVal[3]   = {false, false, false};
     std::unique_ptr<Container> _sw[3];
     std::unique_ptr<Label> _swLab[3];
+    std::vector<std::unique_ptr<Container>> _cv;
+    std::vector<std::unique_ptr<Label>> _lv;
+    Label* _wchLab = nullptr; Label* _rateBtn = nullptr;
+    int _wch = 0, _rateIdx = 0; uint32_t _lastDraw = 0;
     lv_obj_t* _status = nullptr; lv_obj_t* _alarm = nullptr;
     lv_obj_t* _chanLbl = nullptr; lv_obj_t* _chart = nullptr; lv_chart_series_t* _ser = nullptr;
     lv_obj_t* _apLbl = nullptr; lv_obj_t* _list = nullptr;
@@ -2112,6 +2165,23 @@ public:
         });
         refresh_switch();
 
+        // Controls: scan-range (MHz), peak-hold, refresh rate.
+        _loMhz = GetHAL()->getSettingInt("nrf_lo_mhz", 2400);
+        _hiMhz = GetHAL()->getSettingInt("nrf_hi_mhz", 2525);
+        GetHAL()->rfHubSend(std::string("!nlo=") + std::to_string(_loMhz));
+        GetHAL()->rfHubSend(std::string("!nhi=") + std::to_string(_hiMhz));
+        _peakBtn = mk_ctl(_cv, _lv, root, "PEAK: OFF", 230, 86, 150, 50,
+                          [this] { _peak = !_peak; for (int i = 0; i < 126; i++) _peakv[i] = 0; refresh_ctls(); });
+        mk_ctl(_cv, _lv, root, LV_SYMBOL_MINUS, 396, 86, 46, 50, [this] { set_lo(_loMhz - 5); });
+        _loLab = mk_ctl(_cv, _lv, root, "LO 2400", 446, 86, 110, 50, [] {});
+        mk_ctl(_cv, _lv, root, LV_SYMBOL_PLUS, 560, 86, 46, 50, [this] { set_lo(_loMhz + 5); });
+        mk_ctl(_cv, _lv, root, LV_SYMBOL_MINUS, 620, 86, 46, 50, [this] { set_hi(_hiMhz - 5); });
+        _hiLab = mk_ctl(_cv, _lv, root, "HI 2525", 670, 86, 110, 50, [] {});
+        mk_ctl(_cv, _lv, root, LV_SYMBOL_PLUS, 784, 86, 46, 50, [this] { set_hi(_hiMhz + 5); });
+        _rateBtn = mk_ctl(_cv, _lv, root, "RATE: FAST", 846, 86, 180, 50,
+                          [this] { _rateIdx = (_rateIdx + 1) % 3; refresh_ctls(); });
+        refresh_ctls();
+
         _lbl = lv_label_create(root);
         lv_obj_align(_lbl, LV_ALIGN_TOP_LEFT, 24, 150);
         lv_obj_set_style_text_font(_lbl, &lv_font_montserrat_16, 0);
@@ -2140,15 +2210,25 @@ public:
             lv_label_set_text(_status, s);
             lv_obj_set_style_text_color(_status, lv_color_hex(d.linked && d.nrfFound ? 0x38ef7d : 0xff8a80), 0);
         }
-        if (_chart && d.spec24Seq != _seen) {
-            _seen = d.spec24Seq;
-            for (int i = 0; i < 126; i++) lv_chart_set_value_by_id(_chart, _ser, i, d.spec24[i]);
+        uint32_t rate = (_rateIdx == 0) ? 0 : (_rateIdx == 1 ? 500 : 1200);
+        if (_chart && d.spec24Seq != _seen && (lv_tick_get() - _lastDraw) >= rate) {
+            _seen = d.spec24Seq; _lastDraw = lv_tick_get();
+            int mx = 1;
+            for (int i = 0; i < 126; i++) {
+                int live = d.spec24[i];
+                if (_peak && live > _peakv[i]) _peakv[i] = live;
+                int disp = _peak ? _peakv[i] : live;
+                lv_chart_set_value_by_id(_chart, _ser, i, disp);
+                if (disp > mx) mx = disp;
+            }
+            lv_chart_set_range(_chart, LV_CHART_AXIS_PRIMARY_Y, 0, mx < 3 ? 3 : mx);  // auto-scale
             lv_chart_refresh(_chart);
         }
     }
     void onClose() override
     {
-        _swLab.reset(); _sw.reset();
+        _swLab.reset(); _sw.reset(); _cv.clear(); _lv.clear();
+        _peakBtn = _loLab = _hiLab = _rateBtn = nullptr;
         auto del = [](lv_obj_t*& o){ if (o) { lv_obj_del(o); o = nullptr; } };
         del(_status); del(_lbl); del(_chart);
     }
@@ -2162,8 +2242,28 @@ private:
         _swLab->setTextColor(lv_color_hex(col));
         _swLab->setText(std::string("SCAN") + (on ? ": ON" : ": OFF"));
     }
+    void refresh_ctls()
+    {
+        if (_loLab) _loLab->setText("LO " + std::to_string(_loMhz));
+        if (_hiLab) _hiLab->setText("HI " + std::to_string(_hiMhz));
+        if (_peakBtn) { _peakBtn->setText(std::string("PEAK: ") + (_peak ? "ON" : "OFF"));
+                        _peakBtn->setTextColor(lv_color_hex(_peak ? COL_ACCENT : COL_LABEL)); }
+        if (_rateBtn) { static const char* rn[3] = {"FAST", "MED", "SLOW"};
+                        _rateBtn->setText(std::string("RATE: ") + rn[_rateIdx]); }
+    }
+    void set_lo(int m) { if (m < 2400) m = 2400; if (m > _hiMhz - 1) m = _hiMhz - 1;
+        _loMhz = m; GetHAL()->setSettingInt("nrf_lo_mhz", m);
+        GetHAL()->rfHubSend(std::string("!nlo=") + std::to_string(m)); refresh_ctls(); }
+    void set_hi(int m) { if (m > 2525) m = 2525; if (m < _loMhz + 1) m = _loMhz + 1;
+        _hiMhz = m; GetHAL()->setSettingInt("nrf_hi_mhz", m);
+        GetHAL()->rfHubSend(std::string("!nhi=") + std::to_string(m)); refresh_ctls(); }
     std::unique_ptr<Container> _sw;
     std::unique_ptr<Label> _swLab;
+    std::vector<std::unique_ptr<Container>> _cv;
+    std::vector<std::unique_ptr<Label>> _lv;
+    Label* _peakBtn = nullptr; Label* _loLab = nullptr; Label* _hiLab = nullptr; Label* _rateBtn = nullptr;
+    bool _peak = false; int _peakv[126] = {0};
+    int _loMhz = 2400, _hiMhz = 2525, _rateIdx = 0; uint32_t _lastDraw = 0;
     lv_obj_t* _status = nullptr; lv_obj_t* _lbl = nullptr;
     lv_obj_t* _chart = nullptr; lv_chart_series_t* _ser = nullptr;
     uint32_t _seen = 0;
@@ -2179,7 +2279,7 @@ public:
     {
         config.title = "CC1101  SUB-GHZ"; config.bgColor = COL_CARD; config.borderColor = COL_BORDER;
         config.titleColor = COL_TITLE; config.closeBtn = true;
-        config.kfClosed = {0, 0, 200, 140, 0}; config.kfOpened = {0, 0, 1120, 640, 255};
+        config.kfClosed = {0, 0, 200, 140, 0}; config.kfOpened = {0, 0, 1120, 660, 255};
     }
     void onOpen() override
     {
@@ -2234,31 +2334,58 @@ public:
             });
         }
         refresh_bands();
+        GetHAL()->rfHubSend("!srange=0,0,0");   // start in band-preset mode
+
+        // Row 1 extras: refresh rate + auto-scale.
+        _rateBtn = mk_ctl(_cv, _lv, root, "RATE: FAST", 740, 86, 150, 50,
+                          [this] { _rateIdx = (_rateIdx + 1) % 3; refresh_ctls(); });
+        _autoBtn = mk_ctl(_cv, _lv, root, "AUTO: OFF", 900, 86, 150, 50,
+                          [this] { _auto = !_auto; refresh_ctls(); });
+        // Row 2: custom sweep range (MHz) + point count + noise floor (dBm).
+        _stx10 = GetHAL()->getSettingInt("cc_st", 4330);
+        _spx10 = GetHAL()->getSettingInt("cc_sp", 4350);
+        _cn    = GetHAL()->getSettingInt("cc_n", 60);
+        _floor = GetHAL()->getSettingInt("cc_floor", -110);
+        _custBtn = mk_ctl(_cv, _lv, root, "CUSTOM: OFF", 24, 140, 130, 44,
+                          [this] { _custom = !_custom; send_range(); refresh_ctls(); });
+        mk_ctl(_cv, _lv, root, LV_SYMBOL_MINUS, 162, 140, 40, 44, [this] { set_st(_stx10 - 10); });
+        _stLab = mk_ctl(_cv, _lv, root, "433.0", 206, 140, 96, 44, [] {});
+        mk_ctl(_cv, _lv, root, LV_SYMBOL_PLUS, 306, 140, 40, 44, [this] { set_st(_stx10 + 10); });
+        mk_ctl(_cv, _lv, root, LV_SYMBOL_MINUS, 354, 140, 40, 44, [this] { set_sp(_spx10 - 10); });
+        _spLab = mk_ctl(_cv, _lv, root, "435.0", 398, 140, 96, 44, [] {});
+        mk_ctl(_cv, _lv, root, LV_SYMBOL_PLUS, 498, 140, 40, 44, [this] { set_sp(_spx10 + 10); });
+        mk_ctl(_cv, _lv, root, LV_SYMBOL_MINUS, 546, 140, 40, 44, [this] { set_n(_cn - 2); });
+        _nLab = mk_ctl(_cv, _lv, root, "N 60", 590, 140, 80, 44, [] {});
+        mk_ctl(_cv, _lv, root, LV_SYMBOL_PLUS, 674, 140, 40, 44, [this] { set_n(_cn + 2); });
+        mk_ctl(_cv, _lv, root, LV_SYMBOL_MINUS, 722, 140, 40, 44, [this] { set_floor(_floor - 5); });
+        _flLab = mk_ctl(_cv, _lv, root, "-110", 766, 140, 86, 44, [] {});
+        mk_ctl(_cv, _lv, root, LV_SYMBOL_PLUS, 856, 140, 40, 44, [this] { set_floor(_floor + 5); });
+        refresh_ctls();
 
         _lblSub = lv_label_create(root);
-        lv_obj_align(_lblSub, LV_ALIGN_TOP_LEFT, 24, 150);
+        lv_obj_align(_lblSub, LV_ALIGN_TOP_LEFT, 24, 196);
         lv_obj_set_style_text_font(_lblSub, &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_color(_lblSub, lv_color_hex(COL_LABEL), 0);
         lv_label_set_text(_lblSub, "sub-GHz RSSI sweep");
         _cSub = lv_chart_create(root);
-        lv_obj_set_size(_cSub, 1072, 180);
-        lv_obj_align(_cSub, LV_ALIGN_TOP_LEFT, 24, 174);
+        lv_obj_set_size(_cSub, 1072, 170);
+        lv_obj_align(_cSub, LV_ALIGN_TOP_LEFT, 24, 220);
         lv_chart_set_type(_cSub, LV_CHART_TYPE_LINE);
         lv_chart_set_point_count(_cSub, 64);
-        lv_chart_set_range(_cSub, LV_CHART_AXIS_PRIMARY_Y, -110, -20);
+        lv_chart_set_range(_cSub, LV_CHART_AXIS_PRIMARY_Y, _floor, -20);
         lv_chart_set_div_line_count(_cSub, 0, 0);
         _sSub = lv_chart_add_series(_cSub, lv_color_hex(0x43d2ff), LV_CHART_AXIS_PRIMARY_Y);
-        for (int i = 0; i < 64; i++) lv_chart_set_value_by_id(_cSub, _sSub, i, -110);
+        for (int i = 0; i < 64; i++) lv_chart_set_value_by_id(_cSub, _sSub, i, _floor);
 
         _logLbl = lv_label_create(root);
-        lv_obj_align(_logLbl, LV_ALIGN_TOP_LEFT, 24, 372);
+        lv_obj_align(_logLbl, LV_ALIGN_TOP_LEFT, 24, 400);
         lv_obj_set_style_text_font(_logLbl, &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_color(_logLbl, lv_color_hex(COL_LABEL), 0);
         lv_label_set_text(_logLbl, "packets / events  (PACKETS on)");
         _log = lv_label_create(root);
         lv_label_set_long_mode(_log, LV_LABEL_LONG_WRAP);
-        lv_obj_set_size(_log, 1072, 210);
-        lv_obj_align(_log, LV_ALIGN_TOP_LEFT, 24, 396);
+        lv_obj_set_size(_log, 1072, 196);
+        lv_obj_align(_log, LV_ALIGN_TOP_LEFT, 24, 424);
         lv_obj_set_style_text_font(_log, &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_color(_log, lv_color_hex(0x9be8b8), 0);
         lv_label_set_text(_log, "Received sub-GHz packets appear here.");
@@ -2276,10 +2403,17 @@ public:
             lv_label_set_text(_status, s);
             lv_obj_set_style_text_color(_status, lv_color_hex(d.linked && d.ccFound ? 0x38ef7d : 0xff8a80), 0);
         }
-        if (_cSub && d.subSeq != _seenSub) {
-            _seenSub = d.subSeq;
+        if (_cSub && d.subSeq != _seenSub && (lv_tick_get() - _lastDraw) >= _rate_ms()) {
+            _seenSub = d.subSeq; _lastDraw = lv_tick_get();
             int n = d.subN; if (n > 64) n = 64;
-            for (int i = 0; i < 64; i++) lv_chart_set_value_by_id(_cSub, _sSub, i, (i < n) ? d.subRssi[i] : -110);
+            int lo = 999, hi = -999;
+            for (int i = 0; i < 64; i++) {
+                int v = (i < n) ? d.subRssi[i] : _floor;
+                lv_chart_set_value_by_id(_cSub, _sSub, i, v);
+                if (i < n) { if (v < lo) lo = v; if (v > hi) hi = v; }
+            }
+            if (_auto && lo <= hi) lv_chart_set_range(_cSub, LV_CHART_AXIS_PRIMARY_Y, lo - 5, hi + 5);
+            else                   lv_chart_set_range(_cSub, LV_CHART_AXIS_PRIMARY_Y, _floor, -20);
             lv_chart_refresh(_cSub);
             if (_lblSub && n > 0) {
                 char s[96];
@@ -2298,10 +2432,41 @@ public:
     {
         for (int i = 0; i < 2; i++) { _swLab[i].reset(); _sw[i].reset(); }
         for (int i = 0; i < 4; i++) { _bandLab[i].reset(); _band[i].reset(); }
+        _cv.clear(); _lv.clear();
+        _rateBtn = _autoBtn = _custBtn = _stLab = _spLab = _nLab = _flLab = nullptr;
         auto del = [](lv_obj_t*& o){ if (o) { lv_obj_del(o); o = nullptr; } };
         del(_status); del(_bandTitle); del(_lblSub); del(_cSub); del(_logLbl); del(_log);
     }
 private:
+    uint32_t _rate_ms() { return _rateIdx == 0 ? 0 : (_rateIdx == 1 ? 500 : 1200); }
+    void send_range()
+    {
+        if (_custom) { char b[48]; snprintf(b, sizeof(b), "!srange=%.1f,%.1f,%d", _stx10 / 10.0, _spx10 / 10.0, _cn);
+                       GetHAL()->rfHubSend(b); }
+        else GetHAL()->rfHubSend("!srange=0,0,0");
+    }
+    void set_st(int v) { if (v < 3000) v = 3000; if (v > _spx10 - 10) v = _spx10 - 10; _stx10 = v;
+        GetHAL()->setSettingInt("cc_st", v); if (_custom) send_range(); refresh_ctls(); }
+    void set_sp(int v) { if (v > 9280) v = 9280; if (v < _stx10 + 10) v = _stx10 + 10; _spx10 = v;
+        GetHAL()->setSettingInt("cc_sp", v); if (_custom) send_range(); refresh_ctls(); }
+    void set_n(int v) { if (v < 8) v = 8; if (v > 60) v = 60; _cn = v;
+        GetHAL()->setSettingInt("cc_n", v); if (_custom) send_range(); refresh_ctls(); }
+    void set_floor(int v) { if (v < -120) v = -120; if (v > -40) v = -40; _floor = v;
+        GetHAL()->setSettingInt("cc_floor", v); refresh_ctls(); }
+    void refresh_ctls()
+    {
+        char b[16];
+        if (_stLab) { snprintf(b, sizeof(b), "%.1f", _stx10 / 10.0); _stLab->setText(b); }
+        if (_spLab) { snprintf(b, sizeof(b), "%.1f", _spx10 / 10.0); _spLab->setText(b); }
+        if (_nLab)  _nLab->setText("N " + std::to_string(_cn));
+        if (_flLab) _flLab->setText(std::to_string(_floor));
+        if (_custBtn) { _custBtn->setText(std::string("CUSTOM: ") + (_custom ? "ON" : "OFF"));
+                        _custBtn->setTextColor(lv_color_hex(_custom ? COL_ACCENT : COL_LABEL)); }
+        if (_autoBtn) { _autoBtn->setText(std::string("AUTO: ") + (_auto ? "ON" : "OFF"));
+                        _autoBtn->setTextColor(lv_color_hex(_auto ? COL_ACCENT : COL_LABEL)); }
+        if (_rateBtn) { static const char* rn[3] = {"FAST", "MED", "SLOW"};
+                        _rateBtn->setText(std::string("RATE: ") + rn[_rateIdx]); }
+    }
     void refresh_switches()
     {
         auto& d = GetHAL()->rfHub;
@@ -2326,6 +2491,13 @@ private:
     }
     std::unique_ptr<Container> _sw[2], _band[4];
     std::unique_ptr<Label> _swLab[2], _bandLab[4];
+    std::vector<std::unique_ptr<Container>> _cv;
+    std::vector<std::unique_ptr<Label>> _lv;
+    Label* _rateBtn = nullptr; Label* _autoBtn = nullptr; Label* _custBtn = nullptr;
+    Label* _stLab = nullptr; Label* _spLab = nullptr; Label* _nLab = nullptr; Label* _flLab = nullptr;
+    bool _custom = false, _auto = false;
+    int _stx10 = 4330, _spx10 = 4350, _cn = 60, _floor = -110, _rateIdx = 0;
+    uint32_t _lastDraw = 0;
     int _bandSel = 1;   // default 433 MHz
     lv_obj_t* _status = nullptr; lv_obj_t* _bandTitle = nullptr;
     lv_obj_t* _lblSub = nullptr; lv_obj_t* _cSub = nullptr; lv_chart_series_t* _sSub = nullptr;
@@ -2437,9 +2609,6 @@ public:
             {FA_UART,      "UART MONITOR", G_UART,      0xc0c8c4},
             {FA_POWERINFO, "POWER (V/A)",  G_POWERINFO, 0xff8a80},
             {FA_CAMERA,    "SCREEN REC",   TOOL_SCREENREC, 0xff5f57},
-            {FA_UART,      "WIFI ANALYZER",G_WIFIAN,    0x38ef7d},
-            {FA_UART,      "NRF24 2.4G",   G_NRF,       0x43d2ff},
-            {FA_UART,      "CC1101 SUB",   G_CC1101,    0xffb86c},
             {FA_GPIO,      "ACCESS POINT", G_AP,        0xc0c8c4},
         };
         const int ITEM_COUNT = sizeof(items) / sizeof(items[0]);

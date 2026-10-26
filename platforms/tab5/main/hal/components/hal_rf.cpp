@@ -108,7 +108,7 @@ static void rf_parse(const std::string& ln)
             d.enWifi = kv("wifi", d.enWifi); d.enS24 = kv("s24", d.enS24);
             d.enSub  = kv("sub", d.enSub);   d.enSubrx = kv("subrx", d.enSubrx);
             d.nrfFound = kv("nrf", d.nrfFound); d.ccFound = kv("cc", d.ccFound);
-            d.enApi  = kv("api", d.enApi);
+            d.enApi  = kv("api", d.enApi); d.wch = kv("wch", d.wch);
         }
         rf_push_log(d, ln.substr(0, 72));
         return;

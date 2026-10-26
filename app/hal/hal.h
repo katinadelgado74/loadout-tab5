@@ -515,6 +515,7 @@ public:
         bool     ccFound     = false;
         bool     enWifi = false, enS24 = false, enSub = false, enSubrx = false;
         int      band        = 433;
+        int      wch         = 0;       // Wi-Fi monitor channel lock (0 = hop)
         int      spec24[126] = {0};     // 2.4 GHz spectrum, 0..9 per 1 MHz bin
         uint32_t spec24Seq   = 0;
         float    subStartMHz = 0.0f;    // sub-GHz sweep
